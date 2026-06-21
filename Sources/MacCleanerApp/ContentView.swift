@@ -23,14 +23,7 @@ struct ContentView: View {
                     Label("Add Folder", systemImage: "folder.badge.plus")
                 }
 
-                Button {
-                    store.isScanning ? store.stopScan() : store.startScan()
-                } label: {
-                    Label(store.isScanning ? "Stop" : "Scan", systemImage: store.isScanning ? "stop.fill" : "magnifyingglass")
-                }
-                .labelStyle(.titleAndIcon)
-                .controlSize(.large)
-                .disabled(!store.isScanning && !store.canScan)
+                ScanToolbarButton(store: store)
             }
         }
         .task {
@@ -44,5 +37,38 @@ struct ContentView: View {
                 onConfirm: { store.movePendingItemToTrash() }
             )
         }
+    }
+}
+
+private struct ScanToolbarButton: View {
+    @Bindable var store: CleanerStore
+
+    private var isDisabled: Bool {
+        !store.isScanning && !store.canScan
+    }
+
+    private var tint: Color {
+        store.isScanning ? .red : .blue
+    }
+
+    var body: some View {
+        Button {
+            store.isScanning ? store.stopScan() : store.startScan()
+        } label: {
+            Label(store.isScanning ? "Stop" : "Scan", systemImage: store.isScanning ? "stop.fill" : "magnifyingglass")
+                .labelStyle(.titleAndIcon)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(tint)
+                }
+                .opacity(isDisabled ? 0.45 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .accessibilityLabel(store.isScanning ? "Stop Scan" : "Scan")
     }
 }
