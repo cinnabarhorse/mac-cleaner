@@ -119,6 +119,26 @@ final class CleanerStore {
         report != nil
     }
 
+    var fullDiskAccessIssueCount: Int {
+        report?.issues.filter(\.isLikelyPermissionIssue).count ?? 0
+    }
+
+    var shouldShowFullDiskAccessNotice: Bool {
+        fullDiskAccessIssueCount > 0
+    }
+
+    var runningApplicationPath: String {
+        Bundle.main.bundleURL.standardizedFileURL.path
+    }
+
+    var installedApplicationPath: String {
+        CleanerStore.installedApplicationURL.path
+    }
+
+    var isRunningFromInstalledApplication: Bool {
+        runningApplicationPath == installedApplicationPath
+    }
+
     var canScan: Bool {
         !isScanning && !activeRoots.isEmpty
     }
@@ -243,6 +263,24 @@ final class CleanerStore {
         statusMessage = "Copied path."
     }
 
+    func openFullDiskAccessSettings() {
+        let urls = [
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"),
+            URL(string: "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.extension?Privacy_AllFiles")
+        ].compactMap(\.self)
+
+        for url in urls where NSWorkspace.shared.open(url) {
+            statusMessage = "Opened Full Disk Access settings."
+            return
+        }
+
+        lastError = "Could not open Full Disk Access settings."
+    }
+
+    func revealInstalledApplication() {
+        NSWorkspace.shared.activateFileViewerSelecting([CleanerStore.installedApplicationURL])
+    }
+
     func requestDeletion(_ item: DiskItem) {
         pendingDeletionItem = item
     }
@@ -360,6 +398,10 @@ final class CleanerStore {
         }
 
         return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private static var installedApplicationURL: URL {
+        URL(fileURLWithPath: "/Applications/Mac Cleaner.app", isDirectory: true)
     }
 
     private func loadSavedReport() {

@@ -33,3 +33,13 @@ scripts/build-app.sh
 ```
 
 The generated bundle is placed at `.build/MacCleaner.app`.
+
+## Install for Full Disk Access
+
+For reliable macOS privacy permissions, install the app at a stable path before granting Full Disk Access:
+
+```sh
+scripts/install-app.sh
+```
+
+The installer builds and copies the app to `/Applications/Mac Cleaner.app`. Then open **System Settings > Privacy & Security > Full Disk Access**, enable **Mac Cleaner**, quit and reopen the app, and scan again.

@@ -10,6 +10,12 @@ struct ResultsPane: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
 
+            if store.shouldShowFullDiskAccessNotice {
+                FullDiskAccessNotice(store: store)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
+
             Divider()
 
             FilterBar(store: store)
@@ -44,6 +50,60 @@ struct ResultsPane: View {
             }
             .listStyle(.inset)
         }
+    }
+}
+
+private struct FullDiskAccessNotice: View {
+    @Bindable var store: CleanerStore
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "lock.shield")
+                .font(.title3)
+                .foregroundStyle(.orange)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Full Disk Access needed")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            Button {
+                store.revealInstalledApplication()
+            } label: {
+                Label("Reveal App", systemImage: "finder")
+            }
+
+            Button {
+                store.openFullDiskAccessSettings()
+            } label: {
+                Label("Open Settings", systemImage: "gearshape")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+        }
+        .padding(10)
+        .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.orange.opacity(0.22), lineWidth: 0.75)
+        }
+    }
+
+    private var message: String {
+        let count = store.fullDiskAccessIssueCount.formatted()
+        let pathHint = store.isRunningFromInstalledApplication
+            ? "Enable Mac Cleaner in Privacy & Security > Full Disk Access, then quit and reopen the app before scanning again."
+            : "Install and run \(store.installedApplicationPath), enable it in Privacy & Security > Full Disk Access, then scan again."
+        return "macOS blocked \(count) protected folder\(store.fullDiskAccessIssueCount == 1 ? "" : "s"). \(pathHint)"
     }
 }
 
