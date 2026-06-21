@@ -57,40 +57,35 @@ private struct FullDiskAccessNotice: View {
     @Bindable var store: CleanerStore
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "lock.shield")
-                .font(.title3)
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Full Disk Access needed", systemImage: "lock.shield")
+                .font(.subheadline)
+                .fontWeight(.semibold)
                 .foregroundStyle(.orange)
-                .frame(width: 24)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Full Disk Access needed")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
 
-                Text(message)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button {
+                    store.openFullDiskAccessSettings()
+                } label: {
+                    Label("Open Settings", systemImage: "gearshape")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+
+                Button {
+                    store.revealInstalledApplication()
+                } label: {
+                    Label("Reveal App", systemImage: "finder")
+                }
             }
-
-            Spacer(minLength: 12)
-
-            Button {
-                store.revealInstalledApplication()
-            } label: {
-                Label("Reveal App", systemImage: "finder")
-            }
-
-            Button {
-                store.openFullDiskAccessSettings()
-            } label: {
-                Label("Open Settings", systemImage: "gearshape")
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange)
         }
         .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
