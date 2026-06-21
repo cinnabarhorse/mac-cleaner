@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ScanRoot: Identifiable, Hashable, Sendable {
+public struct ScanRoot: Identifiable, Hashable, Codable, Sendable {
     public var id: String { url.path }
 
     public let title: String

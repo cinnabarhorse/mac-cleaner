@@ -29,21 +29,26 @@ final class CleanerStore {
 
     private let scanner: FileScanner
     private let trashService: any TrashManaging
+    private let reportPersistence: ScanReportPersistence
     private let homeDirectory: URL
     private var scanTask: Task<Void, Never>?
     private var deletedItemIDs: Set<DiskItem.ID> = []
     private var didAutoStartScan = false
     private var didSeedExpansion = false
+    private var lastPersistedScannedItemCount = 0
 
     init(
         scanner: FileScanner? = nil,
         trashService: any TrashManaging = FileManagerTrashService(),
+        reportPersistence: ScanReportPersistence = .defaultStore(),
         homeDirectory: URL = CleanerStore.defaultHomeDirectory()
     ) {
         let normalizedHomeDirectory = homeDirectory.standardizedFileURL
         self.scanner = scanner ?? FileScanner(classifier: ItemClassifier(homeDirectory: normalizedHomeDirectory))
         self.trashService = trashService
+        self.reportPersistence = reportPersistence
         self.homeDirectory = normalizedHomeDirectory
+        loadSavedReport()
     }
 
     var activeRoots: [ScanRoot] {
@@ -172,6 +177,11 @@ final class CleanerStore {
         }
 
         didAutoStartScan = true
+
+        if report != nil {
+            return
+        }
+
         startScan()
     }
 
@@ -183,6 +193,7 @@ final class CleanerStore {
         progress = nil
         expandedItemIDs.removeAll()
         didSeedExpansion = false
+        lastPersistedScannedItemCount = 0
 
         let roots = activeRoots
         guard !roots.isEmpty else {
@@ -271,6 +282,7 @@ final class CleanerStore {
         if let partialReport = scanProgress.partialReport {
             report = partialReport
             seedExpansionIfNeeded(for: partialReport)
+            savePartialReportIfNeeded(partialReport)
             if selectedItemID == nil || !partialReport.items.contains(where: { $0.id == selectedItemID }) {
                 selectedItemID = partialReport.items.first?.id
             }
@@ -283,6 +295,7 @@ final class CleanerStore {
     private func finishScan(_ scanReport: ScanReport) {
         report = scanReport
         seedExpansionIfNeeded(for: scanReport)
+        saveReport(scanReport)
         isScanning = false
         selectedItemID = scanReport.items.first?.id
         statusMessage = "Found \(scanReport.items.count.formatted()) large items."
@@ -290,6 +303,9 @@ final class CleanerStore {
     }
 
     private func finishStoppedScan() {
+        if let report {
+            saveReport(report)
+        }
         isScanning = false
         statusMessage = "Scan stopped."
         scanTask = nil
@@ -305,6 +321,9 @@ final class CleanerStore {
     private func finishTrashMove(item: DiskItem, result: TrashOperationResult) {
         deletedItemIDs.insert(item.id)
         report = report?.removingItems(withIDs: deletedItemIDs)
+        if let report {
+            saveReport(report)
+        }
         pendingDeletionItem = nil
         isDeleting = false
         lastTrashResult = result
@@ -341,6 +360,45 @@ final class CleanerStore {
         }
 
         return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private func loadSavedReport() {
+        do {
+            guard let savedReport = try reportPersistence.load() else {
+                return
+            }
+
+            report = savedReport
+            selectedItemID = savedReport.items.first?.id
+            seedExpansionIfNeeded(for: savedReport)
+            let scanLabel = savedReport.isComplete ? "previous scan" : "saved partial scan"
+            statusMessage = "Loaded \(scanLabel) from \(savedReport.finishedAt.formatted(date: .abbreviated, time: .shortened))."
+            lastPersistedScannedItemCount = savedReport.scannedItemCount
+        } catch {
+            lastError = "Could not load previous scan: \(error.localizedDescription)"
+        }
+    }
+
+    private func saveReport(_ report: ScanReport) {
+        do {
+            try reportPersistence.save(report)
+            lastPersistedScannedItemCount = report.scannedItemCount
+        } catch {
+            lastError = "Could not save scan: \(error.localizedDescription)"
+        }
+    }
+
+    private func savePartialReportIfNeeded(_ report: ScanReport) {
+        guard report.scannedItemCount - lastPersistedScannedItemCount >= 25_000 else {
+            return
+        }
+
+        let reportPersistence = reportPersistence
+        lastPersistedScannedItemCount = report.scannedItemCount
+
+        Task.detached(priority: .utility) {
+            try? reportPersistence.save(report)
+        }
     }
 
     private func seedExpansionIfNeeded(for report: ScanReport) {

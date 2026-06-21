@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ScanOptions: Equatable, Sendable {
+public struct ScanOptions: Equatable, Codable, Sendable {
     public var includeHiddenFiles: Bool
     public var includePackageContents: Bool
     public var includeSymlinkTargets: Bool
@@ -44,7 +44,7 @@ public struct ScanProgress: Equatable, Sendable {
     }
 }
 
-public struct ScanIssue: Identifiable, Equatable, Sendable {
+public struct ScanIssue: Identifiable, Equatable, Codable, Sendable {
     public var id: String { path + message }
 
     public let path: String
@@ -56,7 +56,7 @@ public struct ScanIssue: Identifiable, Equatable, Sendable {
     }
 }
 
-public struct ScanReport: Equatable, Sendable {
+public struct ScanReport: Equatable, Codable, Sendable {
     public let roots: [ScanRoot]
     public let items: [DiskItem]
     public let issues: [ScanIssue]
@@ -66,9 +66,23 @@ public struct ScanReport: Equatable, Sendable {
     public let scannedFolderCount: Int
     public let startedAt: Date
     public let finishedAt: Date
+    public let isComplete: Bool
 
     public var duration: TimeInterval {
         finishedAt.timeIntervalSince(startedAt)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case roots
+        case items
+        case issues
+        case totalBytes
+        case scannedItemCount
+        case scannedFileCount
+        case scannedFolderCount
+        case startedAt
+        case finishedAt
+        case isComplete
     }
 
     public init(
@@ -80,7 +94,8 @@ public struct ScanReport: Equatable, Sendable {
         scannedFileCount: Int,
         scannedFolderCount: Int,
         startedAt: Date,
-        finishedAt: Date
+        finishedAt: Date,
+        isComplete: Bool = true
     ) {
         self.roots = roots
         self.items = items
@@ -91,6 +106,22 @@ public struct ScanReport: Equatable, Sendable {
         self.scannedFolderCount = scannedFolderCount
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.isComplete = isComplete
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        roots = try container.decode([ScanRoot].self, forKey: .roots)
+        items = try container.decode([DiskItem].self, forKey: .items)
+        issues = try container.decode([ScanIssue].self, forKey: .issues)
+        totalBytes = try container.decode(Int64.self, forKey: .totalBytes)
+        scannedItemCount = try container.decode(Int.self, forKey: .scannedItemCount)
+        scannedFileCount = try container.decode(Int.self, forKey: .scannedFileCount)
+        scannedFolderCount = try container.decode(Int.self, forKey: .scannedFolderCount)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        finishedAt = try container.decode(Date.self, forKey: .finishedAt)
+        isComplete = try container.decodeIfPresent(Bool.self, forKey: .isComplete) ?? true
     }
 
     public func removingItems(withIDs ids: Set<DiskItem.ID>) -> ScanReport {
@@ -103,7 +134,8 @@ public struct ScanReport: Equatable, Sendable {
             scannedFileCount: scannedFileCount,
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
-            finishedAt: finishedAt
+            finishedAt: finishedAt,
+            isComplete: isComplete
         )
     }
 }

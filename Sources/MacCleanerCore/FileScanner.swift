@@ -52,6 +52,7 @@ public actor FileScanner {
                     scannedFolderCount: scannedFolderCount,
                     startedAt: startedAt,
                     finishedAt: Date(),
+                    isComplete: false,
                     options: options
                 )
             ))
@@ -186,6 +187,7 @@ public actor FileScanner {
                     scannedFolderCount: scannedFolderCount,
                     startedAt: startedAt,
                     finishedAt: Date(),
+                    isComplete: false,
                     options: options
                 )
             ))
@@ -215,6 +217,7 @@ public actor FileScanner {
         scannedFolderCount: Int,
         startedAt: Date,
         finishedAt: Date,
+        isComplete: Bool = true,
         options: ScanOptions
     ) -> ScanReport {
         let items = deduplicated(rawItems)
@@ -235,7 +238,8 @@ public actor FileScanner {
             scannedFileCount: scannedFileCount,
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
-            finishedAt: finishedAt
+            finishedAt: finishedAt,
+            isComplete: isComplete
         )
     }
 
@@ -276,6 +280,7 @@ public actor FileScanner {
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
             finishedAt: Date(),
+            isComplete: false,
             options: options
         )
     }

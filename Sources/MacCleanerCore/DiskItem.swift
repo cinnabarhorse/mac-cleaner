@@ -1,6 +1,6 @@
 import Foundation
 
-public enum DiskItemKind: String, CaseIterable, Sendable {
+public enum DiskItemKind: String, CaseIterable, Codable, Sendable {
     case file
     case folder
     case package
@@ -28,7 +28,7 @@ public enum DiskItemKind: String, CaseIterable, Sendable {
     }
 }
 
-public enum DiskItemCategory: String, CaseIterable, Identifiable, Sendable {
+public enum DiskItemCategory: String, CaseIterable, Identifiable, Codable, Sendable {
     case cache
     case logs
     case developerData
@@ -85,7 +85,7 @@ public enum DiskItemCategory: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-public enum DeletionRisk: Int, CaseIterable, Comparable, Identifiable, Sendable {
+public enum DeletionRisk: Int, CaseIterable, Comparable, Identifiable, Codable, Sendable {
     case low = 0
     case medium = 1
     case high = 2
@@ -116,7 +116,7 @@ public enum DeletionRisk: Int, CaseIterable, Comparable, Identifiable, Sendable 
     }
 }
 
-public struct DiskItem: Identifiable, Hashable, Sendable {
+public struct DiskItem: Identifiable, Hashable, Codable, Sendable {
     public var id: String { path }
 
     public let url: URL
