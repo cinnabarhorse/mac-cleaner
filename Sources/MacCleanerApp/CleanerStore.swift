@@ -1,0 +1,297 @@
+import AppKit
+import Foundation
+import MacCleanerCore
+import Observation
+
+@MainActor
+@Observable
+final class CleanerStore {
+    var selectedScopes: Set<ScanScope> = ScanScope.defaultSelection
+    var customRoots: [ScanRoot] = []
+    var includeHiddenFiles = false
+    var includePackageContents = true
+    var includeSymlinkTargets = false
+    var minimumItemSizeBytes: Int64 = 10 * 1_024 * 1_024
+    var maxReturnedItems = 5_000
+    var searchText = ""
+    var categoryFilter: DiskItemCategory?
+    var riskFilter: DeletionRisk?
+    var selectedItemID: DiskItem.ID?
+    var pendingDeletionItem: DiskItem?
+    var isScanning = false
+    var isDeleting = false
+    var progress: ScanProgress?
+    var report: ScanReport?
+    var statusMessage = "Ready"
+    var lastError: String?
+    var lastTrashResult: TrashOperationResult?
+
+    private let scanner: FileScanner
+    private let trashService: any TrashManaging
+    private let homeDirectory: URL
+    private var scanTask: Task<Void, Never>?
+    private var deletedItemIDs: Set<DiskItem.ID> = []
+
+    init(
+        scanner: FileScanner? = nil,
+        trashService: any TrashManaging = FileManagerTrashService(),
+        homeDirectory: URL = CleanerStore.defaultHomeDirectory()
+    ) {
+        let normalizedHomeDirectory = homeDirectory.standardizedFileURL
+        self.scanner = scanner ?? FileScanner(classifier: ItemClassifier(homeDirectory: normalizedHomeDirectory))
+        self.trashService = trashService
+        self.homeDirectory = normalizedHomeDirectory
+    }
+
+    var activeRoots: [ScanRoot] {
+        let scopedRoots = selectedScopes.flatMap { $0.roots(homeDirectory: homeDirectory) }
+        let roots = scopedRoots + customRoots
+        var seen: Set<String> = []
+
+        return roots.filter { root in
+            let path = root.url.standardizedFileURL.path
+            guard FileManager.default.fileExists(atPath: path) else {
+                return false
+            }
+            return seen.insert(path).inserted
+        }
+    }
+
+    var filteredItems: [DiskItem] {
+        guard let report else {
+            return []
+        }
+
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        return report.items.filter { item in
+            if deletedItemIDs.contains(item.id) {
+                return false
+            }
+
+            if let categoryFilter, item.category != categoryFilter {
+                return false
+            }
+
+            if let riskFilter, item.risk != riskFilter {
+                return false
+            }
+
+            if !query.isEmpty {
+                let searchable = "\(item.name) \(item.path) \(item.category.displayName) \(item.kind.displayName)".lowercased()
+                guard searchable.contains(query) else {
+                    return false
+                }
+            }
+
+            return true
+        }
+    }
+
+    var selectedItem: DiskItem? {
+        guard let selectedItemID else {
+            return filteredItems.first
+        }
+
+        return filteredItems.first { $0.id == selectedItemID }
+            ?? report?.items.first { $0.id == selectedItemID }
+    }
+
+    var totalVisibleBytes: Int64 {
+        filteredItems.reduce(0) { $0 + $1.byteSize }
+    }
+
+    var hasScanResults: Bool {
+        report != nil
+    }
+
+    var canScan: Bool {
+        !isScanning && !activeRoots.isEmpty
+    }
+
+    func setScope(_ scope: ScanScope, enabled: Bool) {
+        if enabled {
+            selectedScopes.insert(scope)
+        } else {
+            selectedScopes.remove(scope)
+        }
+    }
+
+    func addCustomFolder() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Add"
+
+        guard panel.runModal() == .OK else {
+            return
+        }
+
+        for url in panel.urls {
+            let root = ScanRoot(title: url.lastPathComponent, url: url, categoryHint: nil, riskHint: .medium)
+            if !customRoots.contains(where: { $0.url == root.url }) {
+                customRoots.append(root)
+            }
+        }
+    }
+
+    func removeCustomRoot(_ root: ScanRoot) {
+        customRoots.removeAll { $0.id == root.id }
+    }
+
+    func startScan() {
+        scanTask?.cancel()
+        deletedItemIDs.removeAll()
+        lastError = nil
+        lastTrashResult = nil
+        progress = nil
+
+        let roots = activeRoots
+        guard !roots.isEmpty else {
+            report = emptyReport()
+            statusMessage = "No selected locations exist."
+            return
+        }
+
+        let options = ScanOptions(
+            includeHiddenFiles: includeHiddenFiles,
+            includePackageContents: includePackageContents,
+            includeSymlinkTargets: includeSymlinkTargets,
+            minimumItemSizeBytes: minimumItemSizeBytes,
+            maxReturnedItems: maxReturnedItems
+        )
+
+        isScanning = true
+        statusMessage = "Scanning \(roots.count) location\(roots.count == 1 ? "" : "s")..."
+
+        scanTask = Task { [scanner] in
+            do {
+                let scanReport = try await scanner.scan(roots: roots, options: options) { [weak self] scanProgress in
+                    await self?.updateProgress(scanProgress)
+                }
+
+                finishScan(scanReport)
+            } catch is CancellationError {
+                finishStoppedScan()
+            } catch {
+                finishFailedScan(error)
+            }
+        }
+    }
+
+    func stopScan() {
+        scanTask?.cancel()
+    }
+
+    func revealInFinder(_ item: DiskItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    func copyPath(_ item: DiskItem) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(item.path, forType: .string)
+        statusMessage = "Copied path."
+    }
+
+    func requestDeletion(_ item: DiskItem) {
+        pendingDeletionItem = item
+    }
+
+    func movePendingItemToTrash() {
+        guard let item = pendingDeletionItem else {
+            return
+        }
+
+        moveToTrash(item)
+    }
+
+    func moveToTrash(_ item: DiskItem) {
+        guard item.isDeletableCandidate else {
+            lastError = "This item is protected."
+            pendingDeletionItem = nil
+            return
+        }
+
+        isDeleting = true
+        lastError = nil
+        statusMessage = "Moving item to Trash..."
+
+        Task { [trashService] in
+            do {
+                let result = try await trashService.moveToTrash([item.url])
+                finishTrashMove(item: item, result: result)
+            } catch {
+                finishFailedTrashMove(error)
+            }
+        }
+    }
+
+    private func updateProgress(_ scanProgress: ScanProgress) {
+        progress = scanProgress
+        statusMessage = "Scanned \(scanProgress.scannedItemCount.formatted()) items..."
+    }
+
+    private func finishScan(_ scanReport: ScanReport) {
+        report = scanReport
+        isScanning = false
+        selectedItemID = scanReport.items.first?.id
+        statusMessage = "Found \(scanReport.items.count.formatted()) large items."
+        scanTask = nil
+    }
+
+    private func finishStoppedScan() {
+        isScanning = false
+        statusMessage = "Scan stopped."
+        scanTask = nil
+    }
+
+    private func finishFailedScan(_ error: Error) {
+        isScanning = false
+        lastError = error.localizedDescription
+        statusMessage = "Scan failed."
+        scanTask = nil
+    }
+
+    private func finishTrashMove(item: DiskItem, result: TrashOperationResult) {
+        deletedItemIDs.insert(item.id)
+        report = report?.removingItems(withIDs: deletedItemIDs)
+        pendingDeletionItem = nil
+        isDeleting = false
+        lastTrashResult = result
+        selectedItemID = filteredItems.first?.id
+        statusMessage = "Moved item to Trash."
+    }
+
+    private func finishFailedTrashMove(_ error: Error) {
+        pendingDeletionItem = nil
+        isDeleting = false
+        lastError = error.localizedDescription
+        statusMessage = "Move to Trash failed."
+    }
+
+    private func emptyReport() -> ScanReport {
+        let now = Date()
+        return ScanReport(
+            roots: [],
+            items: [],
+            issues: [],
+            totalBytes: 0,
+            scannedItemCount: 0,
+            scannedFileCount: 0,
+            scannedFolderCount: 0,
+            startedAt: now,
+            finishedAt: now
+        )
+    }
+
+    private static func defaultHomeDirectory() -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        if let override = environment["MAC_CLEANER_HOME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+}
