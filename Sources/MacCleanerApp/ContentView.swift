@@ -48,27 +48,40 @@ private struct ScanToolbarButton: View {
     }
 
     private var tint: Color {
-        store.isScanning ? .red : .blue
+        store.isScanning ? .red : .accentColor
+    }
+
+    private var title: String {
+        store.isScanning ? "Stop" : "Scan"
+    }
+
+    private var systemImage: String {
+        store.isScanning ? "stop.fill" : "magnifyingglass"
     }
 
     var body: some View {
         Button {
             store.isScanning ? store.stopScan() : store.startScan()
         } label: {
-            Label(store.isScanning ? "Stop" : "Scan", systemImage: store.isScanning ? "stop.fill" : "magnifyingglass")
+            Label(title, systemImage: systemImage)
                 .labelStyle(.titleAndIcon)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 10)
+                .frame(height: 28)
                 .background {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(tint)
+                    Capsule(style: .continuous)
+                        .fill(tint.opacity(0.12))
+                }
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(tint.opacity(0.24), lineWidth: 0.75)
                 }
                 .opacity(isDisabled ? 0.45 : 1)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .fixedSize()
         .accessibilityLabel(store.isScanning ? "Stop Scan" : "Scan")
     }
 }

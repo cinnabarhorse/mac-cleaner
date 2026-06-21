@@ -70,7 +70,7 @@ private struct EmptyScanView: View {
                 Label("Scan Now", systemImage: "magnifyingglass")
             }
             .buttonStyle(.borderedProminent)
-            .tint(.blue)
+            .tint(.accentColor)
             .controlSize(.large)
             .disabled(!store.canScan)
         }
