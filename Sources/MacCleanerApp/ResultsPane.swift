@@ -95,10 +95,21 @@ private struct FullDiskAccessNotice: View {
 
     private var message: String {
         let count = store.fullDiskAccessIssueCount.formatted()
+        let blockedFolderText = store.fullDiskAccessIssueCount > 0
+            ? "macOS blocked \(count) protected folder\(store.fullDiskAccessIssueCount == 1 ? "" : "s"). "
+            : ""
         let pathHint = store.isRunningFromInstalledApplication
-            ? "Enable Mac Cleaner in Privacy & Security > Full Disk Access, then quit and reopen the app before scanning again."
+            ? "Enable Mac Cleaner in Privacy & Security > Full Disk Access. If it is already enabled, remove it from the list and add this app again, then quit and reopen before scanning."
             : "Install and run \(store.installedApplicationPath), enable it in Privacy & Security > Full Disk Access, then scan again."
-        return "macOS blocked \(count) protected folder\(store.fullDiskAccessIssueCount == 1 ? "" : "s"). \(pathHint)"
+
+        switch store.fullDiskAccessStatus {
+        case .likelyDenied:
+            return "\(blockedFolderText)Full Disk Access is not active for this app build. \(pathHint)"
+        case .unknown:
+            return "\(blockedFolderText)\(pathHint)"
+        case .likelyGranted:
+            return "Full Disk Access is active. Run a new scan to refresh old permission issues."
+        }
     }
 }
 

@@ -26,11 +26,13 @@ final class CleanerStore {
     var lastError: String?
     var lastTrashResult: TrashOperationResult?
     var expandedItemIDs: Set<DiskItem.ID> = []
+    var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
 
     private let scanner: FileScanner
     private let trashService: any TrashManaging
     private let reportPersistence: ScanReportPersistence
     private let homeDirectory: URL
+    private let fullDiskAccessProbe: FullDiskAccessProbe
     private var scanTask: Task<Void, Never>?
     private var deletedItemIDs: Set<DiskItem.ID> = []
     private var didAutoStartScan = false
@@ -41,14 +43,18 @@ final class CleanerStore {
         scanner: FileScanner? = nil,
         trashService: any TrashManaging = FileManagerTrashService(),
         reportPersistence: ScanReportPersistence = .defaultStore(),
-        homeDirectory: URL = CleanerStore.defaultHomeDirectory()
+        homeDirectory: URL = CleanerStore.defaultHomeDirectory(),
+        fullDiskAccessProbe: FullDiskAccessProbe = FullDiskAccessProbe()
     ) {
         let normalizedHomeDirectory = homeDirectory.standardizedFileURL
         self.scanner = scanner ?? FileScanner(classifier: ItemClassifier(homeDirectory: normalizedHomeDirectory))
         self.trashService = trashService
         self.reportPersistence = reportPersistence
         self.homeDirectory = normalizedHomeDirectory
+        self.fullDiskAccessProbe = fullDiskAccessProbe
         loadSavedReport()
+        refreshFullDiskAccessStatus()
+        updateLoadedReportStatusForCurrentAccess()
     }
 
     var activeRoots: [ScanRoot] {
@@ -124,7 +130,14 @@ final class CleanerStore {
     }
 
     var shouldShowFullDiskAccessNotice: Bool {
-        fullDiskAccessIssueCount > 0
+        switch fullDiskAccessStatus {
+        case .likelyDenied:
+            return true
+        case .unknown:
+            return fullDiskAccessIssueCount > 0
+        case .likelyGranted:
+            return false
+        }
     }
 
     var runningApplicationPath: String {
@@ -207,6 +220,7 @@ final class CleanerStore {
 
     func startScan() {
         scanTask?.cancel()
+        refreshFullDiskAccessStatus()
         deletedItemIDs.removeAll()
         lastError = nil
         lastTrashResult = nil
@@ -270,7 +284,7 @@ final class CleanerStore {
         ].compactMap(\.self)
 
         for url in urls where NSWorkspace.shared.open(url) {
-            statusMessage = "Opened Full Disk Access settings."
+            statusMessage = "Opened Full Disk Access settings. If Mac Cleaner is already enabled, remove and add it again."
             return
         }
 
@@ -279,6 +293,10 @@ final class CleanerStore {
 
     func revealInstalledApplication() {
         NSWorkspace.shared.activateFileViewerSelecting([CleanerStore.installedApplicationURL])
+    }
+
+    func refreshFullDiskAccessStatus() {
+        fullDiskAccessStatus = fullDiskAccessProbe.evaluate(homeDirectory: homeDirectory)
     }
 
     func requestDeletion(_ item: DiskItem) {
@@ -331,6 +349,7 @@ final class CleanerStore {
     }
 
     private func finishScan(_ scanReport: ScanReport) {
+        refreshFullDiskAccessStatus()
         report = scanReport
         seedExpansionIfNeeded(for: scanReport)
         saveReport(scanReport)
@@ -419,6 +438,14 @@ final class CleanerStore {
         } catch {
             lastError = "Could not load previous scan: \(error.localizedDescription)"
         }
+    }
+
+    private func updateLoadedReportStatusForCurrentAccess() {
+        guard fullDiskAccessStatus == .likelyGranted, fullDiskAccessIssueCount > 0 else {
+            return
+        }
+
+        statusMessage = "Full Disk Access is active. Scan again to refresh old permission issues."
     }
 
     private func saveReport(_ report: ScanReport) {

@@ -42,4 +42,6 @@ For reliable macOS privacy permissions, install the app at a stable path before 
 scripts/install-app.sh
 ```
 
-The installer builds and copies the app to `/Applications/Mac Cleaner.app`. Then open **System Settings > Privacy & Security > Full Disk Access**, enable **Mac Cleaner**, quit and reopen the app, and scan again.
+The installer builds and copies the app to `/Applications/Mac Cleaner.app`. Then open **System Settings > Privacy & Security > Full Disk Access**, enable **Mac Cleaner**, quit and reopen the app, and scan again. If Mac Cleaner is already listed but scans still show protected-folder permission errors, remove it from the Full Disk Access list and add `/Applications/Mac Cleaner.app` again so macOS records the current code identity.
+
+`scripts/build-app.sh` automatically signs the local bundle with the first available Apple Development identity so macOS can keep a stable Full Disk Access grant across rebuilds. Set `MAC_CLEANER_CODESIGN_IDENTITY=-` to force ad-hoc signing, or set it to a specific signing identity name.
