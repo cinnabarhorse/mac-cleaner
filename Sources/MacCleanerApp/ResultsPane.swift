@@ -58,7 +58,7 @@ private struct FullDiskAccessNotice: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Full Disk Access needed", systemImage: "lock.shield")
+            Label(title, systemImage: "lock.shield")
                 .font(.subheadline)
                 .fontWeight(.semibold)
                 .foregroundStyle(.orange)
@@ -99,7 +99,7 @@ private struct FullDiskAccessNotice: View {
             ? "macOS blocked \(count) protected folder\(store.fullDiskAccessIssueCount == 1 ? "" : "s"). "
             : ""
         let pathHint = store.isRunningFromInstalledApplication
-            ? "Enable Mac Cleaner in Privacy & Security > Full Disk Access. If it is already enabled, remove it from the list and add this app again, then quit and reopen before scanning."
+            ? "System Settings can show the switch on for an older build. Remove Mac Cleaner from Full Disk Access, add this app again, then quit and reopen before scanning."
             : "Install and run \(store.installedApplicationPath), enable it in Privacy & Security > Full Disk Access, then scan again."
 
         switch store.fullDiskAccessStatus {
@@ -109,6 +109,17 @@ private struct FullDiskAccessNotice: View {
             return "\(blockedFolderText)\(pathHint)"
         case .likelyGranted:
             return "Full Disk Access is active. Run a new scan to refresh old permission issues."
+        }
+    }
+
+    private var title: String {
+        switch store.fullDiskAccessStatus {
+        case .likelyDenied:
+            return "Full Disk Access stale or inactive"
+        case .unknown:
+            return "Full Disk Access needed"
+        case .likelyGranted:
+            return "Full Disk Access active"
         }
     }
 }
