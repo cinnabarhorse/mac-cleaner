@@ -17,12 +17,6 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                Button {
-                    store.addCustomFolder()
-                } label: {
-                    Label("Add Folder", systemImage: "folder.badge.plus")
-                }
-
                 ScanToolbarButton(store: store)
             }
         }
