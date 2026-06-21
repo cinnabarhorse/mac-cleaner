@@ -41,6 +41,11 @@ final class FileScannerTests: XCTestCase {
         XCTAssertEqual(root.childFolderCount, 2)
         XCTAssertFalse(root.isDeletableCandidate)
         XCTAssertEqual(report.items.first?.path, root.path)
+
+        let tree = DiskItemTreeBuilder.build(from: report.items)
+        let rootNode = try XCTUnwrap(tree.first { $0.item.path == tempRoot.path })
+        let alphaNode = try XCTUnwrap(rootNode.children.first { $0.item.path == alpha.path })
+        XCTAssertNotNil(alphaNode.children.first { $0.item.name == "large.bin" })
     }
 
     func testMinimumSizeFilterRemovesSmallFiles() async throws {

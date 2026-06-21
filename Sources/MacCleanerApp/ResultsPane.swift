@@ -37,31 +37,10 @@ struct ResultsPane: View {
         } else if store.filteredItems.isEmpty {
             ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease.circle", description: Text("Adjust filters or scan options."))
         } else {
-            List(store.filteredItems, selection: $store.selectedItemID) { item in
-                ResultRow(item: item)
-                    .tag(item.id)
-                    .contextMenu {
-                        Button {
-                            store.revealInFinder(item)
-                        } label: {
-                            Label("Reveal in Finder", systemImage: "finder")
-                        }
-
-                        Button {
-                            store.copyPath(item)
-                        } label: {
-                            Label("Copy Path", systemImage: "doc.on.doc")
-                        }
-
-                        if item.isDeletableCandidate {
-                            Divider()
-                            Button(role: .destructive) {
-                                store.requestDeletion(item)
-                            } label: {
-                                Label("Move to Trash", systemImage: "trash")
-                            }
-                        }
-                    }
+            List {
+                ForEach(store.resultTree) { node in
+                    ResultTreeRow(store: store, node: node)
+                }
             }
             .listStyle(.inset)
         }
@@ -190,13 +169,93 @@ private struct FilterBar: View {
             }
             .disabled(store.categoryFilter == nil && store.riskFilter == nil && store.searchText.isEmpty)
 
+            Divider()
+                .frame(height: 16)
+
+            Button {
+                store.expandVisibleTree()
+            } label: {
+                Label("Expand All", systemImage: "plus.square.on.square")
+            }
+            .disabled(store.resultTree.isEmpty)
+
+            Button {
+                store.collapseVisibleTree()
+            } label: {
+                Label("Collapse All", systemImage: "minus.square")
+            }
+            .disabled(store.resultTree.isEmpty)
+
             Spacer()
+        }
+    }
+}
+
+private struct ResultTreeRow: View {
+    @Bindable var store: CleanerStore
+    let node: DiskItemTreeNode
+
+    var body: some View {
+        if node.hasChildren {
+            DisclosureGroup(isExpanded: expandedBinding) {
+                ForEach(node.children) { child in
+                    ResultTreeRow(store: store, node: child)
+                }
+            } label: {
+                rowLabel
+            }
+        } else {
+            rowLabel
+                .padding(.leading, 18)
+        }
+    }
+
+    private var expandedBinding: Binding<Bool> {
+        Binding {
+            store.expandedItemIDs.contains(node.id)
+        } set: { isExpanded in
+            store.setExpanded(node.id, isExpanded: isExpanded)
+        }
+    }
+
+    private var rowLabel: some View {
+        ResultRow(
+            item: node.item,
+            childCount: node.children.count,
+            isSelected: store.selectedItemID == node.id
+        )
+        .onTapGesture {
+            store.selectedItemID = node.id
+        }
+        .contextMenu {
+            Button {
+                store.revealInFinder(node.item)
+            } label: {
+                Label("Reveal in Finder", systemImage: "finder")
+            }
+
+            Button {
+                store.copyPath(node.item)
+            } label: {
+                Label("Copy Path", systemImage: "doc.on.doc")
+            }
+
+            if node.item.isDeletableCandidate {
+                Divider()
+                Button(role: .destructive) {
+                    store.requestDeletion(node.item)
+                } label: {
+                    Label("Move to Trash", systemImage: "trash")
+                }
+            }
         }
     }
 }
 
 private struct ResultRow: View {
     let item: DiskItem
+    let childCount: Int
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -214,6 +273,13 @@ private struct ResultRow: View {
                     Image(systemName: item.kind.systemImage)
                         .foregroundStyle(.secondary)
                         .help(item.kind.displayName)
+
+                    if childCount > 0 {
+                        Text(childCount.formatted())
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
 
                 Text(item.path)
@@ -234,6 +300,8 @@ private struct ResultRow: View {
                 .frame(width: 104, alignment: .trailing)
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(isSelected ? Color.accentColor.opacity(0.16) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
     }
 

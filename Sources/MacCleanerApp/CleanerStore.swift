@@ -25,6 +25,7 @@ final class CleanerStore {
     var statusMessage = "Ready"
     var lastError: String?
     var lastTrashResult: TrashOperationResult?
+    var expandedItemIDs: Set<DiskItem.ID> = []
 
     private let scanner: FileScanner
     private let trashService: any TrashManaging
@@ -32,6 +33,7 @@ final class CleanerStore {
     private var scanTask: Task<Void, Never>?
     private var deletedItemIDs: Set<DiskItem.ID> = []
     private var didAutoStartScan = false
+    private var didSeedExpansion = false
 
     init(
         scanner: FileScanner? = nil,
@@ -91,6 +93,10 @@ final class CleanerStore {
         }
     }
 
+    var resultTree: [DiskItemTreeNode] {
+        DiskItemTreeBuilder.build(from: filteredItems)
+    }
+
     var selectedItem: DiskItem? {
         guard let selectedItemID else {
             return filteredItems.first
@@ -101,7 +107,7 @@ final class CleanerStore {
     }
 
     var totalVisibleBytes: Int64 {
-        filteredItems.reduce(0) { $0 + $1.byteSize }
+        resultTree.reduce(0) { $0 + $1.item.byteSize }
     }
 
     var hasScanResults: Bool {
@@ -144,6 +150,22 @@ final class CleanerStore {
         customRoots.removeAll { $0.id == root.id }
     }
 
+    func setExpanded(_ itemID: DiskItem.ID, isExpanded: Bool) {
+        if isExpanded {
+            expandedItemIDs.insert(itemID)
+        } else {
+            expandedItemIDs.remove(itemID)
+        }
+    }
+
+    func expandVisibleTree() {
+        expandedItemIDs.formUnion(expandableIDs(in: resultTree))
+    }
+
+    func collapseVisibleTree() {
+        expandedItemIDs.subtract(expandableIDs(in: resultTree))
+    }
+
     func autoStartScanIfNeeded() {
         guard !didAutoStartScan else {
             return
@@ -159,6 +181,8 @@ final class CleanerStore {
         lastError = nil
         lastTrashResult = nil
         progress = nil
+        expandedItemIDs.removeAll()
+        didSeedExpansion = false
 
         let roots = activeRoots
         guard !roots.isEmpty else {
@@ -246,6 +270,7 @@ final class CleanerStore {
 
         if let partialReport = scanProgress.partialReport {
             report = partialReport
+            seedExpansionIfNeeded(for: partialReport)
             if selectedItemID == nil || !partialReport.items.contains(where: { $0.id == selectedItemID }) {
                 selectedItemID = partialReport.items.first?.id
             }
@@ -257,6 +282,7 @@ final class CleanerStore {
 
     private func finishScan(_ scanReport: ScanReport) {
         report = scanReport
+        seedExpansionIfNeeded(for: scanReport)
         isScanning = false
         selectedItemID = scanReport.items.first?.id
         statusMessage = "Found \(scanReport.items.count.formatted()) large items."
@@ -315,5 +341,35 @@ final class CleanerStore {
         }
 
         return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private func seedExpansionIfNeeded(for report: ScanReport) {
+        guard !didSeedExpansion else {
+            return
+        }
+
+        let tree = DiskItemTreeBuilder.build(from: report.items)
+        guard !tree.isEmpty else {
+            return
+        }
+
+        expandedItemIDs.formUnion(tree.filter(\.hasChildren).map(\.id))
+        didSeedExpansion = true
+    }
+
+    private func expandableIDs(in nodes: [DiskItemTreeNode]) -> Set<DiskItem.ID> {
+        var ids: Set<DiskItem.ID> = []
+
+        func visit(_ node: DiskItemTreeNode) {
+            guard node.hasChildren else {
+                return
+            }
+
+            ids.insert(node.id)
+            node.children.forEach(visit)
+        }
+
+        nodes.forEach(visit)
+        return ids
     }
 }
