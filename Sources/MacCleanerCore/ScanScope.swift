@@ -54,6 +54,22 @@ public enum ScanScope: String, CaseIterable, Identifiable, Sendable {
         .finalCut
     ]
 
+    public static let scanPriority: [ScanScope] = [
+        .libraryCaches,
+        .libraryLogs,
+        .codex,
+        .capCut,
+        .finalCut,
+        .downloads,
+        .movies,
+        .developerData,
+        .applicationSupport,
+        .documents,
+        .home,
+        .systemCaches,
+        .systemApplicationSupport
+    ]
+
     public var title: String {
         switch self {
         case .documents: "Documents"

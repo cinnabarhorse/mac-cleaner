@@ -38,6 +38,24 @@ public actor FileScanner {
             var directoryFileCounts: [String: Int] = [rootPath: 0]
             var directoryFolderCounts: [String: Int] = [rootPath: 0]
 
+            await progress?(ScanProgress(
+                currentPath: rootPath,
+                scannedItemCount: scannedItemCount,
+                scannedByteCount: totalBytes,
+                partialReport: records.isEmpty ? nil : makeReport(
+                    roots: roots,
+                    items: records,
+                    issues: issues,
+                    totalBytes: totalBytes,
+                    scannedItemCount: scannedItemCount,
+                    scannedFileCount: scannedFileCount,
+                    scannedFolderCount: scannedFolderCount,
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    options: options
+                )
+            ))
+
             do {
                 let rootValues = try root.url.resourceValues(forKeys: resourceKeys)
                 let rootKind = itemKind(from: rootValues)
@@ -106,9 +124,36 @@ public actor FileScanner {
                         break
                     }
 
-                    if scannedItemCount.isMultiple(of: 250) {
+                    if scannedItemCount.isMultiple(of: 100) {
                         let scannedBytes = totalBytes + (directoryBytes[rootPath] ?? 0)
-                        await progress?(ScanProgress(currentPath: path, scannedItemCount: scannedItemCount, scannedByteCount: scannedBytes))
+                        let partialReport: ScanReport? = if scannedItemCount.isMultiple(of: options.snapshotItemInterval) {
+                            snapshotReport(
+                                roots: roots,
+                                completedItems: records,
+                                seeds: seeds,
+                                directoryBytes: directoryBytes,
+                                directoryFileCounts: directoryFileCounts,
+                                directoryFolderCounts: directoryFolderCounts,
+                                root: root,
+                                rootPath: rootPath,
+                                issues: issues,
+                                totalBytes: scannedBytes,
+                                scannedItemCount: scannedItemCount,
+                                scannedFileCount: scannedFileCount,
+                                scannedFolderCount: scannedFolderCount,
+                                startedAt: startedAt,
+                                options: options
+                            )
+                        } else {
+                            nil
+                        }
+
+                        await progress?(ScanProgress(
+                            currentPath: path,
+                            scannedItemCount: scannedItemCount,
+                            scannedByteCount: scannedBytes,
+                            partialReport: partialReport
+                        ))
                     }
                 } catch {
                     issues.append(ScanIssue(path: path, message: error.localizedDescription))
@@ -127,10 +172,52 @@ public actor FileScanner {
                 options: options
             ))
 
-            await progress?(ScanProgress(currentPath: rootPath, scannedItemCount: scannedItemCount, scannedByteCount: totalBytes))
+            await progress?(ScanProgress(
+                currentPath: rootPath,
+                scannedItemCount: scannedItemCount,
+                scannedByteCount: totalBytes,
+                partialReport: makeReport(
+                    roots: roots,
+                    items: records,
+                    issues: issues,
+                    totalBytes: totalBytes,
+                    scannedItemCount: scannedItemCount,
+                    scannedFileCount: scannedFileCount,
+                    scannedFolderCount: scannedFolderCount,
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    options: options
+                )
+            ))
         }
 
-        let items = deduplicated(records)
+        return makeReport(
+            roots: roots,
+            items: records,
+            issues: issues,
+            totalBytes: totalBytes,
+            scannedItemCount: scannedItemCount,
+            scannedFileCount: scannedFileCount,
+            scannedFolderCount: scannedFolderCount,
+            startedAt: startedAt,
+            finishedAt: Date(),
+            options: options
+        )
+    }
+
+    private func makeReport(
+        roots: [ScanRoot],
+        items rawItems: [DiskItem],
+        issues: [ScanIssue],
+        totalBytes: Int64,
+        scannedItemCount: Int,
+        scannedFileCount: Int,
+        scannedFolderCount: Int,
+        startedAt: Date,
+        finishedAt: Date,
+        options: ScanOptions
+    ) -> ScanReport {
+        let items = deduplicated(rawItems)
             .sorted { lhs, rhs in
                 if lhs.byteSize == rhs.byteSize {
                     return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
@@ -148,7 +235,48 @@ public actor FileScanner {
             scannedFileCount: scannedFileCount,
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
-            finishedAt: Date()
+            finishedAt: finishedAt
+        )
+    }
+
+    private func snapshotReport(
+        roots: [ScanRoot],
+        completedItems: [DiskItem],
+        seeds: [String: ItemSeed],
+        directoryBytes: [String: Int64],
+        directoryFileCounts: [String: Int],
+        directoryFolderCounts: [String: Int],
+        root: ScanRoot,
+        rootPath: String,
+        issues: [ScanIssue],
+        totalBytes: Int64,
+        scannedItemCount: Int,
+        scannedFileCount: Int,
+        scannedFolderCount: Int,
+        startedAt: Date,
+        options: ScanOptions
+    ) -> ScanReport {
+        let currentItems = items(
+            from: seeds,
+            directoryBytes: directoryBytes,
+            directoryFileCounts: directoryFileCounts,
+            directoryFolderCounts: directoryFolderCounts,
+            root: root,
+            rootPath: rootPath,
+            options: options
+        )
+
+        return makeReport(
+            roots: roots,
+            items: completedItems + currentItems,
+            issues: issues,
+            totalBytes: totalBytes,
+            scannedItemCount: scannedItemCount,
+            scannedFileCount: scannedFileCount,
+            scannedFolderCount: scannedFolderCount,
+            startedAt: startedAt,
+            finishedAt: Date(),
+            options: options
         )
     }
 

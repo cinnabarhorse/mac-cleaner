@@ -33,7 +33,7 @@ struct ResultsPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if !store.hasScanResults {
-            ContentUnavailableView("No Scan Results", systemImage: "magnifyingglass", description: Text("Ready to scan selected locations."))
+            EmptyScanView(store: store)
         } else if store.filteredItems.isEmpty {
             ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease.circle", description: Text("Adjust filters or scan options."))
         } else {
@@ -65,6 +65,37 @@ struct ResultsPane: View {
             }
             .listStyle(.inset)
         }
+    }
+}
+
+private struct EmptyScanView: View {
+    @Bindable var store: CleanerStore
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 44, weight: .regular))
+                .foregroundStyle(.secondary)
+
+            Text("No Scan Results")
+                .font(.title3)
+                .fontWeight(.semibold)
+
+            Text(store.canScan ? "Scanning starts automatically. You can also start it manually." : "Select at least one existing location to scan.")
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            Button {
+                store.startScan()
+            } label: {
+                Label("Scan Now", systemImage: "magnifyingglass")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!store.canScan)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

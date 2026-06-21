@@ -31,6 +31,7 @@ final class CleanerStore {
     private let homeDirectory: URL
     private var scanTask: Task<Void, Never>?
     private var deletedItemIDs: Set<DiskItem.ID> = []
+    private var didAutoStartScan = false
 
     init(
         scanner: FileScanner? = nil,
@@ -44,7 +45,9 @@ final class CleanerStore {
     }
 
     var activeRoots: [ScanRoot] {
-        let scopedRoots = selectedScopes.flatMap { $0.roots(homeDirectory: homeDirectory) }
+        let scopedRoots = ScanScope.scanPriority
+            .filter { selectedScopes.contains($0) }
+            .flatMap { $0.roots(homeDirectory: homeDirectory) }
         let roots = scopedRoots + customRoots
         var seen: Set<String> = []
 
@@ -141,6 +144,15 @@ final class CleanerStore {
         customRoots.removeAll { $0.id == root.id }
     }
 
+    func autoStartScanIfNeeded() {
+        guard !didAutoStartScan else {
+            return
+        }
+
+        didAutoStartScan = true
+        startScan()
+    }
+
     func startScan() {
         scanTask?.cancel()
         deletedItemIDs.removeAll()
@@ -160,7 +172,8 @@ final class CleanerStore {
             includePackageContents: includePackageContents,
             includeSymlinkTargets: includeSymlinkTargets,
             minimumItemSizeBytes: minimumItemSizeBytes,
-            maxReturnedItems: maxReturnedItems
+            maxReturnedItems: maxReturnedItems,
+            snapshotItemInterval: 500
         )
 
         isScanning = true
@@ -230,7 +243,16 @@ final class CleanerStore {
 
     private func updateProgress(_ scanProgress: ScanProgress) {
         progress = scanProgress
-        statusMessage = "Scanned \(scanProgress.scannedItemCount.formatted()) items..."
+
+        if let partialReport = scanProgress.partialReport {
+            report = partialReport
+            if selectedItemID == nil || !partialReport.items.contains(where: { $0.id == selectedItemID }) {
+                selectedItemID = partialReport.items.first?.id
+            }
+            statusMessage = "Scanning... found \(partialReport.items.count.formatted()) large items after \(scanProgress.scannedItemCount.formatted()) scanned."
+        } else {
+            statusMessage = "Scanning \(scanProgress.currentPath) • \(scanProgress.scannedItemCount.formatted()) items..."
+        }
     }
 
     private func finishScan(_ scanReport: ScanReport) {

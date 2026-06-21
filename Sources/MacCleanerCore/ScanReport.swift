@@ -6,19 +6,22 @@ public struct ScanOptions: Equatable, Sendable {
     public var includeSymlinkTargets: Bool
     public var minimumItemSizeBytes: Int64
     public var maxReturnedItems: Int
+    public var snapshotItemInterval: Int
 
     public init(
         includeHiddenFiles: Bool = false,
         includePackageContents: Bool = true,
         includeSymlinkTargets: Bool = false,
         minimumItemSizeBytes: Int64 = 10 * 1_024 * 1_024,
-        maxReturnedItems: Int = 5_000
+        maxReturnedItems: Int = 5_000,
+        snapshotItemInterval: Int = 5_000
     ) {
         self.includeHiddenFiles = includeHiddenFiles
         self.includePackageContents = includePackageContents
         self.includeSymlinkTargets = includeSymlinkTargets
         self.minimumItemSizeBytes = minimumItemSizeBytes
         self.maxReturnedItems = max(1, maxReturnedItems)
+        self.snapshotItemInterval = max(1, snapshotItemInterval)
     }
 }
 
@@ -26,11 +29,18 @@ public struct ScanProgress: Equatable, Sendable {
     public let currentPath: String
     public let scannedItemCount: Int
     public let scannedByteCount: Int64
+    public let partialReport: ScanReport?
 
-    public init(currentPath: String, scannedItemCount: Int, scannedByteCount: Int64) {
+    public init(
+        currentPath: String,
+        scannedItemCount: Int,
+        scannedByteCount: Int64,
+        partialReport: ScanReport? = nil
+    ) {
         self.currentPath = currentPath
         self.scannedItemCount = scannedItemCount
         self.scannedByteCount = scannedByteCount
+        self.partialReport = partialReport
     }
 }
 

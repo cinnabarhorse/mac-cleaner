@@ -118,6 +118,27 @@ final class FileScannerTests: XCTestCase {
         XCTAssertLessThan(filtered.items.count, report.items.count)
     }
 
+    func testScannerEmitsPartialSnapshots() async throws {
+        let file = tempRoot.appendingPathComponent("large.bin")
+        try writeFile(file, byteCount: 1 * 1_024 * 1_024)
+        let collector = SnapshotCollector()
+
+        _ = try await makeScanner().scan(
+            roots: [ScanRoot(title: "Fixture", url: tempRoot, categoryHint: .downloads, riskHint: .medium)],
+            options: ScanOptions(minimumItemSizeBytes: 0, snapshotItemInterval: 1)
+        ) { progress in
+            if let partialReport = progress.partialReport {
+                await collector.append(partialReport)
+            }
+        }
+
+        let snapshots = await collector.snapshots
+        XCTAssertFalse(snapshots.isEmpty)
+        XCTAssertTrue(snapshots.contains { report in
+            report.items.contains { $0.path == file.path }
+        })
+    }
+
     private func makeScanner() -> FileScanner {
         FileScanner(classifier: ItemClassifier(homeDirectory: tempRoot))
     }
@@ -125,5 +146,13 @@ final class FileScannerTests: XCTestCase {
     private func writeFile(_ url: URL, byteCount: Int) throws {
         let data = Data(repeating: 0x2A, count: byteCount)
         try data.write(to: url, options: .atomic)
+    }
+}
+
+private actor SnapshotCollector {
+    private(set) var snapshots: [ScanReport] = []
+
+    func append(_ report: ScanReport) {
+        snapshots.append(report)
     }
 }

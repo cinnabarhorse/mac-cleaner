@@ -28,8 +28,13 @@ struct ContentView: View {
                 } label: {
                     Label(store.isScanning ? "Stop" : "Scan", systemImage: store.isScanning ? "stop.fill" : "magnifyingglass")
                 }
+                .labelStyle(.titleAndIcon)
+                .controlSize(.large)
                 .disabled(!store.isScanning && !store.canScan)
             }
+        }
+        .task {
+            store.autoStartScanIfNeeded()
         }
         .sheet(item: $store.pendingDeletionItem) { item in
             DeleteConfirmationView(

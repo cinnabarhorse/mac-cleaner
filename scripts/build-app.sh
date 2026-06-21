@@ -10,5 +10,6 @@ mkdir -p "$app_dir/Contents/MacOS"
 cp Packaging/Info.plist "$app_dir/Contents/Info.plist"
 cp "$binary_dir/MacCleaner" "$app_dir/Contents/MacOS/MacCleaner"
 chmod +x "$app_dir/Contents/MacOS/MacCleaner"
+codesign --force --deep --sign - "$app_dir" >/dev/null
 
 echo "Built $app_dir"
