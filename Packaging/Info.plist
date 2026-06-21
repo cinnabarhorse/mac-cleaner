@@ -6,7 +6,11 @@
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>MacCleaner</string>
+    <key>CFBundleDisplayName</key>
+    <string>Mac Cleaner</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon.icns</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.codex.MacCleaner</string>
