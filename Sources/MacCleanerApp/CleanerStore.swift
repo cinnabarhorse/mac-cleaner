@@ -16,8 +16,8 @@ final class CleanerStore {
     var searchText = ""
     var categoryFilter: DiskItemCategory?
     var riskFilter: DeletionRisk?
-    var selectedItemID: DiskItem.ID?
-    var pendingDeletionItem: DiskItem?
+    var selectedItemIDs: Set<DiskItem.ID> = []
+    var pendingDeletionPlan: DeletionPlan?
     var isScanning = false
     var isDeleting = false
     var progress: ScanProgress?
@@ -102,13 +102,16 @@ final class CleanerStore {
         DiskItemTreeBuilder.build(from: filteredItems)
     }
 
-    var selectedItem: DiskItem? {
-        guard let selectedItemID else {
-            return filteredItems.first
-        }
+    var selectedItems: [DiskItem] {
+        filteredItems.filter { selectedItemIDs.contains($0.id) }
+    }
 
-        return filteredItems.first { $0.id == selectedItemID }
-            ?? report?.items.first { $0.id == selectedItemID }
+    var selectedDeletionPlan: DeletionPlan {
+        DeletionPlan(items: selectedItems)
+    }
+
+    var canRequestDeletionForSelection: Bool {
+        pendingDeletionPlan == nil && !isDeleting && !selectedDeletionPlan.isEmpty
     }
 
     var totalVisibleBytes: Int64 {
@@ -171,6 +174,14 @@ final class CleanerStore {
         expandedItemIDs.subtract(expandableIDs(in: resultTree))
     }
 
+    func toggleSelection(_ itemID: DiskItem.ID) {
+        if selectedItemIDs.contains(itemID) {
+            selectedItemIDs.remove(itemID)
+        } else {
+            selectedItemIDs.insert(itemID)
+        }
+    }
+
     func autoStartScanIfNeeded() {
         guard !didAutoStartScan else {
             return
@@ -192,6 +203,7 @@ final class CleanerStore {
         lastTrashResult = nil
         progress = nil
         expandedItemIDs.removeAll()
+        selectedItemIDs.removeAll()
         didSeedExpansion = false
         lastPersistedScannedItemCount = 0
 
@@ -244,32 +256,51 @@ final class CleanerStore {
     }
 
     func requestDeletion(_ item: DiskItem) {
-        pendingDeletionItem = item
+        requestDeletion(items: [item])
     }
 
-    func movePendingItemToTrash() {
-        guard let item = pendingDeletionItem else {
+    func requestDeletionForSelection() {
+        requestDeletion(items: selectedItems)
+    }
+
+    func requestDeletion(items: [DiskItem]) {
+        let plan = DeletionPlan(items: items)
+        guard !plan.isEmpty else {
+            statusMessage = "No deletable items selected."
             return
         }
 
-        moveToTrash(item)
+        pendingDeletionPlan = plan
+    }
+
+    func movePendingItemsToTrash() {
+        guard let plan = pendingDeletionPlan else {
+            return
+        }
+
+        moveToTrash(plan.items)
     }
 
     func moveToTrash(_ item: DiskItem) {
-        guard item.isDeletableCandidate else {
+        moveToTrash([item])
+    }
+
+    func moveToTrash(_ items: [DiskItem]) {
+        let plan = DeletionPlan(items: items)
+        guard !plan.isEmpty else {
             lastError = "This item is protected."
-            pendingDeletionItem = nil
+            pendingDeletionPlan = nil
             return
         }
 
         isDeleting = true
         lastError = nil
-        statusMessage = "Moving item to Trash..."
+        statusMessage = "Moving \(plan.items.count.formatted()) item\(plan.items.count == 1 ? "" : "s") to Trash..."
 
         Task { [trashService] in
             do {
-                let result = try await trashService.moveToTrash([item.url])
-                finishTrashMove(item: item, result: result)
+                let result = try await trashService.moveToTrash(plan.items.map(\.url))
+                finishTrashMove(items: plan.items, result: result)
             } catch {
                 finishFailedTrashMove(error)
             }
@@ -283,9 +314,7 @@ final class CleanerStore {
             report = partialReport
             seedExpansionIfNeeded(for: partialReport)
             savePartialReportIfNeeded(partialReport)
-            if selectedItemID == nil || !partialReport.items.contains(where: { $0.id == selectedItemID }) {
-                selectedItemID = partialReport.items.first?.id
-            }
+            reconcileSelection(with: partialReport.items)
             statusMessage = "Scanning... found \(partialReport.items.count.formatted()) large items after \(scanProgress.scannedItemCount.formatted()) scanned."
         } else {
             statusMessage = "Scanning \(scanProgress.currentPath) • \(scanProgress.scannedItemCount.formatted()) items..."
@@ -297,7 +326,7 @@ final class CleanerStore {
         seedExpansionIfNeeded(for: scanReport)
         saveReport(scanReport)
         isScanning = false
-        selectedItemID = scanReport.items.first?.id
+        reconcileSelection(with: scanReport.items)
         statusMessage = "Found \(scanReport.items.count.formatted()) large items."
         scanTask = nil
     }
@@ -318,21 +347,23 @@ final class CleanerStore {
         scanTask = nil
     }
 
-    private func finishTrashMove(item: DiskItem, result: TrashOperationResult) {
-        deletedItemIDs.insert(item.id)
+    private func finishTrashMove(items: [DiskItem], result: TrashOperationResult) {
+        let movedItemIDs = Set(items.map(\.id))
+        deletedItemIDs.formUnion(movedItemIDs)
         report = report?.removingItems(withIDs: deletedItemIDs)
         if let report {
             saveReport(report)
         }
-        pendingDeletionItem = nil
+        pendingDeletionPlan = nil
         isDeleting = false
         lastTrashResult = result
-        selectedItemID = filteredItems.first?.id
-        statusMessage = "Moved item to Trash."
+        selectedItemIDs.subtract(movedItemIDs)
+        reconcileSelection(with: filteredItems)
+        statusMessage = "Moved \(items.count.formatted()) item\(items.count == 1 ? "" : "s") to Trash."
     }
 
     private func finishFailedTrashMove(_ error: Error) {
-        pendingDeletionItem = nil
+        pendingDeletionPlan = nil
         isDeleting = false
         lastError = error.localizedDescription
         statusMessage = "Move to Trash failed."
@@ -369,8 +400,8 @@ final class CleanerStore {
             }
 
             report = savedReport
-            selectedItemID = savedReport.items.first?.id
             seedExpansionIfNeeded(for: savedReport)
+            reconcileSelection(with: savedReport.items)
             let scanLabel = savedReport.isComplete ? "previous scan" : "saved partial scan"
             statusMessage = "Loaded \(scanLabel) from \(savedReport.finishedAt.formatted(date: .abbreviated, time: .shortened))."
             lastPersistedScannedItemCount = savedReport.scannedItemCount
@@ -429,5 +460,14 @@ final class CleanerStore {
 
         nodes.forEach(visit)
         return ids
+    }
+
+    private func reconcileSelection(with items: [DiskItem]) {
+        let itemIDs = Set(items.map(\.id))
+        selectedItemIDs.formIntersection(itemIDs)
+
+        if selectedItemIDs.isEmpty, let firstItem = items.first {
+            selectedItemIDs = [firstItem.id]
+        }
     }
 }

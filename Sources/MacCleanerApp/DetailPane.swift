@@ -6,12 +6,119 @@ struct DetailPane: View {
 
     var body: some View {
         Group {
-            if let item = store.selectedItem {
+            if store.selectedItems.count == 1, let item = store.selectedItems.first {
                 ItemDetailView(store: store, item: item)
+            } else if !store.selectedItems.isEmpty {
+                MultiSelectionDetailView(store: store)
             } else {
                 ContentUnavailableView("No Item Selected", systemImage: "sidebar.right", description: Text("Select a result to inspect details."))
             }
         }
+    }
+}
+
+private struct MultiSelectionDetailView: View {
+    @Bindable var store: CleanerStore
+
+    private var plan: DeletionPlan {
+        store.selectedDeletionPlan
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+                actions
+                metadata
+                selectedItems
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Image(systemName: "checklist")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+
+                Text("\(store.selectedItems.count.formatted()) Items Selected")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .lineLimit(2)
+            }
+
+            Text("\(plan.items.count.formatted()) item\(plan.items.count == 1 ? "" : "s") can be moved to Trash.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var actions: some View {
+        HStack {
+            Button {
+                copySelectedPaths()
+            } label: {
+                Label("Copy Paths", systemImage: "doc.on.doc")
+            }
+
+            Spacer()
+
+            Button(role: .destructive) {
+                store.requestDeletionForSelection()
+            } label: {
+                Label("Move to Trash", systemImage: "trash")
+            }
+            .disabled(!store.canRequestDeletionForSelection)
+            .help(plan.isEmpty ? "No selected items can be moved to Trash" : "Move selected items to Trash")
+        }
+    }
+
+    private var metadata: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            MetadataTextRow(label: "Selected", value: store.selectedItems.count.formatted())
+            MetadataTextRow(label: "Movable", value: plan.items.count.formatted())
+            MetadataTextRow(label: "Size", value: ByteFormat.string(from: plan.totalBytes))
+
+            if let highestRisk = plan.highestRisk {
+                MetadataAccessoryRow(label: "Risk") {
+                    RiskBadge(risk: highestRisk)
+                }
+            }
+        }
+    }
+
+    private var selectedItems: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Selected Items")
+                .font(.headline)
+
+            ForEach(store.selectedItems.prefix(10)) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name)
+                        .fontWeight(.semibold)
+                    Text(item.path)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.caption)
+            }
+
+            if store.selectedItems.count > 10 {
+                Text("\((store.selectedItems.count - 10).formatted()) more")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func copySelectedPaths() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(store.selectedItems.map(\.path).joined(separator: "\n"), forType: .string)
+        store.statusMessage = "Copied selected paths."
     }
 }
 

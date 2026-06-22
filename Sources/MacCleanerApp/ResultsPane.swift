@@ -37,7 +37,7 @@ struct ResultsPane: View {
         } else if store.filteredItems.isEmpty {
             ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease.circle", description: Text("Adjust filters or scan options."))
         } else {
-            List {
+            List(selection: $store.selectedItemIDs) {
                 ForEach(store.resultTree) { node in
                     ResultTreeRow(store: store, node: node)
                 }
@@ -205,9 +205,11 @@ private struct ResultTreeRow: View {
             } label: {
                 rowLabel
             }
+            .tag(node.id)
         } else {
             rowLabel
                 .padding(.leading, 18)
+                .tag(node.id)
         }
     }
 
@@ -223,11 +225,11 @@ private struct ResultTreeRow: View {
         ResultRow(
             item: node.item,
             childCount: node.children.count,
-            isSelected: store.selectedItemID == node.id
+            isSelected: store.selectedItemIDs.contains(node.id),
+            onToggleSelection: {
+                store.toggleSelection(node.id)
+            }
         )
-        .onTapGesture {
-            store.selectedItemID = node.id
-        }
         .contextMenu {
             Button {
                 store.revealInFinder(node.item)
@@ -244,12 +246,24 @@ private struct ResultTreeRow: View {
             if node.item.isDeletableCandidate {
                 Divider()
                 Button(role: .destructive) {
-                    store.requestDeletion(node.item)
+                    if store.selectedItemIDs.contains(node.id), store.selectedDeletionPlan.items.count > 1 {
+                        store.requestDeletionForSelection()
+                    } else {
+                        store.requestDeletion(node.item)
+                    }
                 } label: {
-                    Label("Move to Trash", systemImage: "trash")
+                    Label(trashMenuTitle, systemImage: "trash")
                 }
             }
         }
+    }
+
+    private var trashMenuTitle: String {
+        if store.selectedItemIDs.contains(node.id), store.selectedDeletionPlan.items.count > 1 {
+            return "Move Selected to Trash"
+        }
+
+        return "Move to Trash"
     }
 }
 
@@ -257,9 +271,21 @@ private struct ResultRow: View {
     let item: DiskItem
     let childCount: Int
     let isSelected: Bool
+    let onToggleSelection: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            Button(action: onToggleSelection) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help(isSelected ? "Deselect" : "Select")
+            .accessibilityLabel(isSelected ? "Deselect \(item.name)" : "Select \(item.name)")
+
             Image(systemName: item.category.systemImage)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(categoryColor)

@@ -23,6 +23,12 @@ struct MacCleanerApp: App {
                 }
                 .keyboardShortcut(".", modifiers: [.command])
                 .disabled(!store.isScanning)
+
+                Button("Move Selected to Trash") {
+                    store.requestDeletionForSelection()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+                .disabled(!store.canRequestDeletionForSelection)
             }
         }
 
