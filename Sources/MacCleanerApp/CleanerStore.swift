@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import MacCleanerCore
 import Observation
+import UniformTypeIdentifiers
 
 @MainActor
 @Observable
@@ -16,8 +17,9 @@ final class CleanerStore {
     var searchText = ""
     var categoryFilter: DiskItemCategory?
     var riskFilter: DeletionRisk?
-    var selectedItemID: DiskItem.ID?
-    var pendingDeletionItem: DiskItem?
+    var ageFilter: ItemAgeFilter = .any
+    var selectedItemIDs: Set<DiskItem.ID> = []
+    var pendingDeletionPlan: DeletionPlan?
     var isScanning = false
     var isDeleting = false
     var progress: ScanProgress?
@@ -26,11 +28,13 @@ final class CleanerStore {
     var lastError: String?
     var lastTrashResult: TrashOperationResult?
     var expandedItemIDs: Set<DiskItem.ID> = []
+    var fullDiskAccessStatus: FullDiskAccessStatus = .unknown
 
     private let scanner: FileScanner
     private let trashService: any TrashManaging
     private let reportPersistence: ScanReportPersistence
     private let homeDirectory: URL
+    private let fullDiskAccessProbe: FullDiskAccessProbe
     private var scanTask: Task<Void, Never>?
     private var deletedItemIDs: Set<DiskItem.ID> = []
     private var didAutoStartScan = false
@@ -41,14 +45,18 @@ final class CleanerStore {
         scanner: FileScanner? = nil,
         trashService: any TrashManaging = FileManagerTrashService(),
         reportPersistence: ScanReportPersistence = .defaultStore(),
-        homeDirectory: URL = CleanerStore.defaultHomeDirectory()
+        homeDirectory: URL = CleanerStore.defaultHomeDirectory(),
+        fullDiskAccessProbe: FullDiskAccessProbe = FullDiskAccessProbe()
     ) {
         let normalizedHomeDirectory = homeDirectory.standardizedFileURL
         self.scanner = scanner ?? FileScanner(classifier: ItemClassifier(homeDirectory: normalizedHomeDirectory))
         self.trashService = trashService
         self.reportPersistence = reportPersistence
         self.homeDirectory = normalizedHomeDirectory
+        self.fullDiskAccessProbe = fullDiskAccessProbe
         loadSavedReport()
+        refreshFullDiskAccessStatus()
+        updateLoadedReportStatusForCurrentAccess()
     }
 
     var activeRoots: [ScanRoot] {
@@ -87,6 +95,10 @@ final class CleanerStore {
                 return false
             }
 
+            if !ageFilter.includes(item) {
+                return false
+            }
+
             if !query.isEmpty {
                 let searchable = "\(item.name) \(item.path) \(item.category.displayName) \(item.kind.displayName)".lowercased()
                 guard searchable.contains(query) else {
@@ -102,13 +114,24 @@ final class CleanerStore {
         DiskItemTreeBuilder.build(from: filteredItems)
     }
 
-    var selectedItem: DiskItem? {
-        guard let selectedItemID else {
-            return filteredItems.first
-        }
+    var selectedItems: [DiskItem] {
+        filteredItems.filter { selectedItemIDs.contains($0.id) }
+    }
 
-        return filteredItems.first { $0.id == selectedItemID }
-            ?? report?.items.first { $0.id == selectedItemID }
+    var selectedDeletionPlan: DeletionPlan {
+        DeletionPlan(items: selectedItems)
+    }
+
+    var smartCleanupPlan: SmartCleanupPlan {
+        SmartCleanupPlan(items: filteredItems)
+    }
+
+    var canSelectSafePicks: Bool {
+        !smartCleanupPlan.isEmpty
+    }
+
+    var canRequestDeletionForSelection: Bool {
+        pendingDeletionPlan == nil && !isDeleting && !selectedDeletionPlan.isEmpty
     }
 
     var totalVisibleBytes: Int64 {
@@ -119,8 +142,39 @@ final class CleanerStore {
         report != nil
     }
 
+    var fullDiskAccessIssueCount: Int {
+        report?.issues.filter(\.isLikelyPermissionIssue).count ?? 0
+    }
+
+    var shouldShowFullDiskAccessNotice: Bool {
+        switch fullDiskAccessStatus {
+        case .likelyDenied:
+            return true
+        case .unknown:
+            return fullDiskAccessIssueCount > 0
+        case .likelyGranted:
+            return false
+        }
+    }
+
+    var runningApplicationPath: String {
+        Bundle.main.bundleURL.standardizedFileURL.path
+    }
+
+    var installedApplicationPath: String {
+        CleanerStore.installedApplicationURL.path
+    }
+
+    var isRunningFromInstalledApplication: Bool {
+        runningApplicationPath == installedApplicationPath
+    }
+
     var canScan: Bool {
         !isScanning && !activeRoots.isEmpty
+    }
+
+    var hasActiveFilters: Bool {
+        categoryFilter != nil || riskFilter != nil || ageFilter != .any || !searchText.isEmpty
     }
 
     func setScope(_ scope: ScanScope, enabled: Bool) {
@@ -171,6 +225,32 @@ final class CleanerStore {
         expandedItemIDs.subtract(expandableIDs(in: resultTree))
     }
 
+    func toggleSelection(_ itemID: DiskItem.ID) {
+        if selectedItemIDs.contains(itemID) {
+            selectedItemIDs.remove(itemID)
+        } else {
+            selectedItemIDs.insert(itemID)
+        }
+    }
+
+    func selectSafePicks() {
+        let plan = smartCleanupPlan
+        guard !plan.isEmpty else {
+            statusMessage = "No safe picks found."
+            return
+        }
+
+        selectedItemIDs = Set(plan.items.map(\.id))
+        statusMessage = "Selected \(plan.items.count.formatted()) safe pick\(plan.items.count == 1 ? "" : "s") worth \(ByteFormat.string(from: plan.totalBytes))."
+    }
+
+    func clearFilters() {
+        categoryFilter = nil
+        riskFilter = nil
+        ageFilter = .any
+        searchText = ""
+    }
+
     func autoStartScanIfNeeded() {
         guard !didAutoStartScan else {
             return
@@ -187,11 +267,13 @@ final class CleanerStore {
 
     func startScan() {
         scanTask?.cancel()
+        refreshFullDiskAccessStatus()
         deletedItemIDs.removeAll()
         lastError = nil
         lastTrashResult = nil
         progress = nil
         expandedItemIDs.removeAll()
+        selectedItemIDs.removeAll()
         didSeedExpansion = false
         lastPersistedScannedItemCount = 0
 
@@ -243,33 +325,100 @@ final class CleanerStore {
         statusMessage = "Copied path."
     }
 
-    func requestDeletion(_ item: DiskItem) {
-        pendingDeletionItem = item
-    }
-
-    func movePendingItemToTrash() {
-        guard let item = pendingDeletionItem else {
+    func exportReport(as format: ScanReportExportFormat) {
+        guard let report else {
+            statusMessage = "No scan report to export."
             return
         }
 
-        moveToTrash(item)
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = defaultExportFileName(for: report, format: format)
+        if let contentType = UTType(filenameExtension: format.fileExtension) {
+            panel.allowedContentTypes = [contentType]
+        }
+
+        guard panel.runModal() == .OK, let url = panel.url else {
+            return
+        }
+
+        do {
+            let export = ScanReportExporter.export(report, as: format)
+            try export.write(to: url, atomically: true, encoding: .utf8)
+            statusMessage = "Exported \(format.displayName) report."
+        } catch {
+            lastError = "Could not export report: \(error.localizedDescription)"
+        }
+    }
+
+    func openFullDiskAccessSettings() {
+        let urls = [
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"),
+            URL(string: "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.extension?Privacy_AllFiles")
+        ].compactMap(\.self)
+
+        for url in urls where NSWorkspace.shared.open(url) {
+            statusMessage = "Opened Full Disk Access settings. If Mac Cleaner is already enabled, remove and add it again."
+            return
+        }
+
+        lastError = "Could not open Full Disk Access settings."
+    }
+
+    func revealInstalledApplication() {
+        NSWorkspace.shared.activateFileViewerSelecting([CleanerStore.installedApplicationURL])
+    }
+
+    func refreshFullDiskAccessStatus() {
+        fullDiskAccessStatus = fullDiskAccessProbe.evaluate(homeDirectory: homeDirectory)
+    }
+
+    func requestDeletion(_ item: DiskItem) {
+        requestDeletion(items: [item])
+    }
+
+    func requestDeletionForSelection() {
+        requestDeletion(items: selectedItems)
+    }
+
+    func requestDeletion(items: [DiskItem]) {
+        let plan = DeletionPlan(items: items)
+        guard !plan.isEmpty else {
+            statusMessage = "No deletable items selected."
+            return
+        }
+
+        pendingDeletionPlan = plan
+    }
+
+    func movePendingItemsToTrash() {
+        guard let plan = pendingDeletionPlan else {
+            return
+        }
+
+        moveToTrash(plan.items)
     }
 
     func moveToTrash(_ item: DiskItem) {
-        guard item.isDeletableCandidate else {
+        moveToTrash([item])
+    }
+
+    func moveToTrash(_ items: [DiskItem]) {
+        let plan = DeletionPlan(items: items)
+        guard !plan.isEmpty else {
             lastError = "This item is protected."
-            pendingDeletionItem = nil
+            pendingDeletionPlan = nil
             return
         }
 
         isDeleting = true
         lastError = nil
-        statusMessage = "Moving item to Trash..."
+        statusMessage = "Moving \(plan.items.count.formatted()) item\(plan.items.count == 1 ? "" : "s") to Trash..."
 
         Task { [trashService] in
             do {
-                let result = try await trashService.moveToTrash([item.url])
-                finishTrashMove(item: item, result: result)
+                let result = try await trashService.moveToTrash(plan.items.map(\.url))
+                finishTrashMove(items: plan.items, result: result)
             } catch {
                 finishFailedTrashMove(error)
             }
@@ -283,9 +432,7 @@ final class CleanerStore {
             report = partialReport
             seedExpansionIfNeeded(for: partialReport)
             savePartialReportIfNeeded(partialReport)
-            if selectedItemID == nil || !partialReport.items.contains(where: { $0.id == selectedItemID }) {
-                selectedItemID = partialReport.items.first?.id
-            }
+            reconcileSelection(with: partialReport.items)
             statusMessage = "Scanning... found \(partialReport.items.count.formatted()) large items after \(scanProgress.scannedItemCount.formatted()) scanned."
         } else {
             statusMessage = "Scanning \(scanProgress.currentPath) • \(scanProgress.scannedItemCount.formatted()) items..."
@@ -293,11 +440,12 @@ final class CleanerStore {
     }
 
     private func finishScan(_ scanReport: ScanReport) {
+        refreshFullDiskAccessStatus()
         report = scanReport
         seedExpansionIfNeeded(for: scanReport)
         saveReport(scanReport)
         isScanning = false
-        selectedItemID = scanReport.items.first?.id
+        reconcileSelection(with: scanReport.items)
         statusMessage = "Found \(scanReport.items.count.formatted()) large items."
         scanTask = nil
     }
@@ -318,21 +466,23 @@ final class CleanerStore {
         scanTask = nil
     }
 
-    private func finishTrashMove(item: DiskItem, result: TrashOperationResult) {
-        deletedItemIDs.insert(item.id)
+    private func finishTrashMove(items: [DiskItem], result: TrashOperationResult) {
+        let movedItemIDs = Set(items.map(\.id))
+        deletedItemIDs.formUnion(movedItemIDs)
         report = report?.removingItems(withIDs: deletedItemIDs)
         if let report {
             saveReport(report)
         }
-        pendingDeletionItem = nil
+        pendingDeletionPlan = nil
         isDeleting = false
         lastTrashResult = result
-        selectedItemID = filteredItems.first?.id
-        statusMessage = "Moved item to Trash."
+        selectedItemIDs.subtract(movedItemIDs)
+        reconcileSelection(with: filteredItems)
+        statusMessage = "Moved \(items.count.formatted()) item\(items.count == 1 ? "" : "s") to Trash."
     }
 
     private func finishFailedTrashMove(_ error: Error) {
-        pendingDeletionItem = nil
+        pendingDeletionPlan = nil
         isDeleting = false
         lastError = error.localizedDescription
         statusMessage = "Move to Trash failed."
@@ -362,6 +512,16 @@ final class CleanerStore {
         return FileManager.default.homeDirectoryForCurrentUser
     }
 
+    private static var installedApplicationURL: URL {
+        URL(fileURLWithPath: "/Applications/Mac Cleaner.app", isDirectory: true)
+    }
+
+    private func defaultExportFileName(for report: ScanReport, format: ScanReportExportFormat) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return "mac-cleaner-\(formatter.string(from: report.finishedAt)).\(format.fileExtension)"
+    }
+
     private func loadSavedReport() {
         do {
             guard let savedReport = try reportPersistence.load() else {
@@ -369,14 +529,22 @@ final class CleanerStore {
             }
 
             report = savedReport
-            selectedItemID = savedReport.items.first?.id
             seedExpansionIfNeeded(for: savedReport)
+            reconcileSelection(with: savedReport.items)
             let scanLabel = savedReport.isComplete ? "previous scan" : "saved partial scan"
             statusMessage = "Loaded \(scanLabel) from \(savedReport.finishedAt.formatted(date: .abbreviated, time: .shortened))."
             lastPersistedScannedItemCount = savedReport.scannedItemCount
         } catch {
             lastError = "Could not load previous scan: \(error.localizedDescription)"
         }
+    }
+
+    private func updateLoadedReportStatusForCurrentAccess() {
+        guard fullDiskAccessStatus == .likelyGranted, fullDiskAccessIssueCount > 0 else {
+            return
+        }
+
+        statusMessage = "Full Disk Access is active. Scan again to refresh old permission issues."
     }
 
     private func saveReport(_ report: ScanReport) {
@@ -429,5 +597,14 @@ final class CleanerStore {
 
         nodes.forEach(visit)
         return ids
+    }
+
+    private func reconcileSelection(with items: [DiskItem]) {
+        let itemIDs = Set(items.map(\.id))
+        selectedItemIDs.formIntersection(itemIDs)
+
+        if selectedItemIDs.isEmpty, let firstItem = items.first {
+            selectedItemIDs = [firstItem.id]
+        }
     }
 }

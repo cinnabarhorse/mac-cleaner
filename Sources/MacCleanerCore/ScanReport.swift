@@ -50,6 +50,14 @@ public struct ScanIssue: Identifiable, Equatable, Codable, Sendable {
     public let path: String
     public let message: String
 
+    public var isLikelyPermissionIssue: Bool {
+        let normalizedMessage = message.lowercased()
+        return normalizedMessage.contains("permission")
+            || normalizedMessage.contains("operation not permitted")
+            || normalizedMessage.contains("not authorized")
+            || normalizedMessage.contains("privacy")
+    }
+
     public init(path: String, message: String) {
         self.path = path
         self.message = message

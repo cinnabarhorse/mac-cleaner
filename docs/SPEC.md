@@ -144,10 +144,15 @@ Expected controls:
 - Package-contents toggle.
 - Minimum-size picker.
 - Category and risk filters.
+- Staleness filter for items untouched for 30, 90, 180, or 365 days.
+- Safe Picks action that selects old low-risk cache, log, and Trash candidates.
+- Multi-selection and batch Move to Trash with nested selections coalesced under selected parents.
+- Markdown and CSV report export.
 - Add folder button.
 - Reveal in Finder button.
 - Copy path button.
 - Move to Trash button for eligible items.
+- Full Disk Access notice with settings/install guidance when protected-folder permission issues are detected.
 
 Empty, loading, error, and partial-permission states must be visible without blocking successful scan results.
 
