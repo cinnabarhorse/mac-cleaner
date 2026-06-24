@@ -1,3 +1,4 @@
+import AppKit
 import MacCleanerCore
 import SwiftUI
 
@@ -23,13 +24,92 @@ struct ContentView: View {
         .task {
             store.autoStartScanIfNeeded()
         }
-        .sheet(item: $store.pendingDeletionItem) { item in
+        .onDeleteCommand {
+            store.requestDeletionForSelection()
+        }
+        .background {
+            DeleteKeyMonitorView(isEnabled: store.canRequestDeletionForSelection) {
+                store.requestDeletionForSelection()
+            }
+            .frame(width: 0, height: 0)
+        }
+        .sheet(item: $store.pendingDeletionPlan) { plan in
             DeleteConfirmationView(
-                item: item,
+                plan: plan,
                 isDeleting: store.isDeleting,
-                onCancel: { store.pendingDeletionItem = nil },
-                onConfirm: { store.movePendingItemToTrash() }
+                onCancel: { store.pendingDeletionPlan = nil },
+                onConfirm: { store.movePendingItemsToTrash() }
             )
+        }
+    }
+}
+
+private struct DeleteKeyMonitorView: NSViewRepresentable {
+    let isEnabled: Bool
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.action = action
+        context.coordinator.install()
+        return NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isEnabled = isEnabled
+        context.coordinator.action = action
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class Coordinator {
+        var isEnabled = false
+        var action: () -> Void = {}
+        private var monitor: Any?
+
+        func install() {
+            guard monitor == nil else {
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, self.isEnabled, Self.isDeleteKey(event), !Self.isTextEditing else {
+                    return event
+                }
+
+                self.action()
+                return nil
+            }
+        }
+
+        func uninstall() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            monitor = nil
+        }
+
+        private static func isDeleteKey(_ event: NSEvent) -> Bool {
+            let deleteKeyCode: UInt16 = 51
+            let forwardDeleteKeyCode: UInt16 = 117
+            let relevantModifiers = event.modifierFlags.intersection([.command, .option, .control])
+            return relevantModifiers.isEmpty && (event.keyCode == deleteKeyCode || event.keyCode == forwardDeleteKeyCode)
+        }
+
+        private static var isTextEditing: Bool {
+            MainActor.assumeIsolated {
+                guard let firstResponder = NSApp.keyWindow?.firstResponder else {
+                    return false
+                }
+
+                return firstResponder is NSTextView || firstResponder is NSTextField
+            }
         }
     }
 }

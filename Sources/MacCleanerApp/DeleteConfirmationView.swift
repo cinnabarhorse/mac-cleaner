@@ -2,7 +2,7 @@ import MacCleanerCore
 import SwiftUI
 
 struct DeleteConfirmationView: View {
-    let item: DiskItem
+    let plan: DeletionPlan
     let isDeleting: Bool
     let onCancel: () -> Void
     let onConfirm: () -> Void
@@ -18,16 +18,25 @@ struct DeleteConfirmationView: View {
                     Text("Move to Trash?")
                         .font(.title2)
                         .fontWeight(.semibold)
-                    Text(item.name)
+                    Text(subtitle)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                MetadataLine(label: "Size", value: ByteFormat.string(from: item.byteSize))
-                MetadataLine(label: "Risk", value: item.risk.displayName)
-                MetadataLine(label: "Path", value: item.path)
+                MetadataLine(label: "Items", value: plan.items.count.formatted())
+                MetadataLine(label: "Size", value: ByteFormat.string(from: plan.totalBytes))
+
+                if let highestRisk = plan.highestRisk {
+                    MetadataLine(label: "Risk", value: highestRisk.displayName)
+                }
+
+                if plan.items.count == 1, let item = plan.items.first {
+                    MetadataLine(label: "Path", value: item.path)
+                } else {
+                    itemList
+                }
             }
 
             HStack {
@@ -41,7 +50,7 @@ struct DeleteConfirmationView: View {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Label("Move to Trash", systemImage: "trash")
+                        Label(confirmTitle, systemImage: "trash")
                     }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -49,7 +58,41 @@ struct DeleteConfirmationView: View {
             }
         }
         .padding(24)
-        .frame(width: 460)
+        .frame(width: 500)
+    }
+
+    private var subtitle: String {
+        guard plan.items.count != 1 else {
+            return plan.items.first?.name ?? "1 item"
+        }
+
+        return "\(plan.items.count.formatted()) items selected"
+    }
+
+    private var confirmTitle: String {
+        guard plan.items.count != 1 else {
+            return "Move to Trash"
+        }
+
+        return "Move \(plan.items.count.formatted()) to Trash"
+    }
+
+    private var itemList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(plan.items.prefix(6)) { item in
+                Text(item.path)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            if plan.items.count > 6 {
+                Text("\((plan.items.count - 6).formatted()) more")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 }
 

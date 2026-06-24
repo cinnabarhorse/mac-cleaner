@@ -10,6 +10,12 @@ struct ResultsPane: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
 
+            if store.shouldShowFullDiskAccessNotice {
+                FullDiskAccessNotice(store: store)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
+
             Divider()
 
             FilterBar(store: store)
@@ -37,12 +43,83 @@ struct ResultsPane: View {
         } else if store.filteredItems.isEmpty {
             ContentUnavailableView("No Matching Items", systemImage: "line.3.horizontal.decrease.circle", description: Text("Adjust filters or scan options."))
         } else {
-            List {
+            List(selection: $store.selectedItemIDs) {
                 ForEach(store.resultTree) { node in
                     ResultTreeRow(store: store, node: node)
                 }
             }
             .listStyle(.inset)
+        }
+    }
+}
+
+private struct FullDiskAccessNotice: View {
+    @Bindable var store: CleanerStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: "lock.shield")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundStyle(.orange)
+
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+
+            HStack {
+                Button {
+                    store.openFullDiskAccessSettings()
+                } label: {
+                    Label("Open Settings", systemImage: "gearshape")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+
+                Button {
+                    store.revealInstalledApplication()
+                } label: {
+                    Label("Reveal App", systemImage: "finder")
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(.orange.opacity(0.22), lineWidth: 0.75)
+        }
+    }
+
+    private var message: String {
+        let count = store.fullDiskAccessIssueCount.formatted()
+        let blockedFolderText = store.fullDiskAccessIssueCount > 0
+            ? "macOS blocked \(count) protected folder\(store.fullDiskAccessIssueCount == 1 ? "" : "s"). "
+            : ""
+        let pathHint = store.isRunningFromInstalledApplication
+            ? "System Settings can show the switch on for an older build. Remove Mac Cleaner from Full Disk Access, add this app again, then quit and reopen before scanning."
+            : "Install and run \(store.installedApplicationPath), enable it in Privacy & Security > Full Disk Access, then scan again."
+
+        switch store.fullDiskAccessStatus {
+        case .likelyDenied:
+            return "\(blockedFolderText)Full Disk Access is not active for this app build. \(pathHint)"
+        case .unknown:
+            return "\(blockedFolderText)\(pathHint)"
+        case .likelyGranted:
+            return "Full Disk Access is active. Run a new scan to refresh old permission issues."
+        }
+    }
+
+    private var title: String {
+        switch store.fullDiskAccessStatus {
+        case .likelyDenied:
+            return "Full Disk Access stale or inactive"
+        case .unknown:
+            return "Full Disk Access needed"
+        case .likelyGranted:
+            return "Full Disk Access active"
         }
     }
 }
@@ -93,6 +170,14 @@ private struct SummaryStrip: View {
                     MetricView(title: "Issues", value: report.issues.count.formatted())
                 }
 
+                if !store.smartCleanupPlan.isEmpty {
+                    MetricView(title: "Safe Picks", value: ByteFormat.string(from: store.smartCleanupPlan.totalBytes))
+                }
+
+                if !store.selectedItems.isEmpty {
+                    MetricView(title: "Selected", value: store.selectedItems.count.formatted())
+                }
+
                 Spacer()
 
                 if store.isScanning {
@@ -140,6 +225,13 @@ private struct FilterBar: View {
     @Bindable var store: CleanerStore
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            filterControls
+            actionControls
+        }
+    }
+
+    private var filterControls: some View {
         HStack {
             Picker("Category", selection: $store.categoryFilter) {
                 Text("All Categories").tag(DiskItemCategory?.none)
@@ -161,14 +253,51 @@ private struct FilterBar: View {
             .pickerStyle(.menu)
             .frame(maxWidth: 170)
 
+            Picker("Age", selection: $store.ageFilter) {
+                ForEach(ItemAgeFilter.allCases) { filter in
+                    Text(filter.displayName).tag(filter)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: 150)
+
             Button {
-                store.categoryFilter = nil
-                store.riskFilter = nil
-                store.searchText = ""
+                store.clearFilters()
             } label: {
                 Label("Clear", systemImage: "xmark.circle")
             }
-            .disabled(store.categoryFilter == nil && store.riskFilter == nil && store.searchText.isEmpty)
+            .disabled(!store.hasActiveFilters)
+
+            Spacer()
+        }
+    }
+
+    private var actionControls: some View {
+        HStack {
+            Button {
+                store.selectSafePicks()
+            } label: {
+                Label("Safe Picks", systemImage: "sparkles")
+            }
+            .disabled(!store.canSelectSafePicks)
+            .help("Select old low-risk cache, log, and trash items")
+
+            Menu {
+                Button {
+                    store.exportReport(as: .markdown)
+                } label: {
+                    Label("Markdown", systemImage: "doc.richtext")
+                }
+
+                Button {
+                    store.exportReport(as: .csv)
+                } label: {
+                    Label("CSV", systemImage: "tablecells")
+                }
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .disabled(store.report == nil)
 
             Divider()
                 .frame(height: 16)
@@ -205,9 +334,11 @@ private struct ResultTreeRow: View {
             } label: {
                 rowLabel
             }
+            .tag(node.id)
         } else {
             rowLabel
                 .padding(.leading, 18)
+                .tag(node.id)
         }
     }
 
@@ -223,11 +354,11 @@ private struct ResultTreeRow: View {
         ResultRow(
             item: node.item,
             childCount: node.children.count,
-            isSelected: store.selectedItemID == node.id
+            isSelected: store.selectedItemIDs.contains(node.id),
+            onToggleSelection: {
+                store.toggleSelection(node.id)
+            }
         )
-        .onTapGesture {
-            store.selectedItemID = node.id
-        }
         .contextMenu {
             Button {
                 store.revealInFinder(node.item)
@@ -244,12 +375,24 @@ private struct ResultTreeRow: View {
             if node.item.isDeletableCandidate {
                 Divider()
                 Button(role: .destructive) {
-                    store.requestDeletion(node.item)
+                    if store.selectedItemIDs.contains(node.id), store.selectedDeletionPlan.items.count > 1 {
+                        store.requestDeletionForSelection()
+                    } else {
+                        store.requestDeletion(node.item)
+                    }
                 } label: {
-                    Label("Move to Trash", systemImage: "trash")
+                    Label(trashMenuTitle, systemImage: "trash")
                 }
             }
         }
+    }
+
+    private var trashMenuTitle: String {
+        if store.selectedItemIDs.contains(node.id), store.selectedDeletionPlan.items.count > 1 {
+            return "Move Selected to Trash"
+        }
+
+        return "Move to Trash"
     }
 }
 
@@ -257,9 +400,21 @@ private struct ResultRow: View {
     let item: DiskItem
     let childCount: Int
     let isSelected: Bool
+    let onToggleSelection: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
+            Button(action: onToggleSelection) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help(isSelected ? "Deselect" : "Select")
+            .accessibilityLabel(isSelected ? "Deselect \(item.name)" : "Select \(item.name)")
+
             Image(systemName: item.category.systemImage)
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(categoryColor)

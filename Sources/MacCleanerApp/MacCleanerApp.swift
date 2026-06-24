@@ -23,6 +23,30 @@ struct MacCleanerApp: App {
                 }
                 .keyboardShortcut(".", modifiers: [.command])
                 .disabled(!store.isScanning)
+
+                Button("Move Selected to Trash") {
+                    store.requestDeletionForSelection()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+                .disabled(!store.canRequestDeletionForSelection)
+
+                Divider()
+
+                Button("Select Safe Picks") {
+                    store.selectSafePicks()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(!store.canSelectSafePicks)
+
+                Button("Export Markdown Report") {
+                    store.exportReport(as: .markdown)
+                }
+                .disabled(store.report == nil)
+
+                Button("Export CSV Report") {
+                    store.exportReport(as: .csv)
+                }
+                .disabled(store.report == nil)
             }
         }
 
