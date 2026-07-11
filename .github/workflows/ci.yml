@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests-and-coverage:
+    name: Tests and coverage
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Print toolchain
+        run: swift --version
+
+      - name: Run tests with coverage
+        id: coverage
+        run: |
+          set -euo pipefail
+          swift test --enable-code-coverage
+          coverage_path="$(swift test --show-codecov-path)"
+          test -s "$coverage_path"
+          artifact_path="$RUNNER_TEMP/MacCleaner-codecov.json"
+          /bin/cp "$coverage_path" "$artifact_path"
+          echo "path=$artifact_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mac-cleaner-coverage
+          path: ${{ steps.coverage.outputs.path }}
+          if-no-files-found: error
+
+  thread-sanitizer:
+    name: Thread Sanitizer
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Run tests with Thread Sanitizer
+        run: swift test --sanitize thread
+
+  universal-package:
+    name: Universal package smoke test
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build ad-hoc universal app
+        env:
+          MAC_CLEANER_VERSION: 0.0.0
+          MAC_CLEANER_BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/build-universal-app.sh
+
+      - name: Verify app bundle
+        run: scripts/verify-app.sh .build/universal/MacCleaner.app
+
+      - name: Launch packaged app with isolated data
+        run: scripts/smoke-test-app.sh .build/universal/MacCleaner.app
