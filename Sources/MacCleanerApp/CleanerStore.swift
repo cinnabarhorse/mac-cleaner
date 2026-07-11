@@ -424,10 +424,14 @@ final class CleanerStore {
             }
 
             ids.insert(node.id)
-            node.children.forEach(visit)
+            for child in node.children {
+                visit(child)
+            }
         }
 
-        nodes.forEach(visit)
+        for node in nodes {
+            visit(node)
+        }
         return ids
     }
 }
