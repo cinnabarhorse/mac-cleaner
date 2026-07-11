@@ -23,9 +23,7 @@ swift run MacCleaner
 For controlled UI testing, point the app at a disposable home directory:
 
 ```sh
-MAC_CLEANER_HOME=/tmp/mac-cleaner-e2e-home \
-MAC_CLEANER_DATA_DIR=/tmp/mac-cleaner-e2e-data \
-swift run MacCleaner
+MAC_CLEANER_HOME=/tmp/mac-cleaner-e2e-home swift run MacCleaner
 ```
 
 ## Package a local app bundle
