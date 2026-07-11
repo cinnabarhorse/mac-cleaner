@@ -1,4 +1,6 @@
+import AppKit
 import MacCleanerCore
+import MacCleanerFeatures
 import SwiftUI
 
 struct ContentView: View {
@@ -21,16 +23,31 @@ struct ContentView: View {
             }
         }
         .task {
-            store.autoStartScanIfNeeded()
+            await store.bootstrap()
         }
-        .sheet(item: $store.pendingDeletionItem) { item in
-            DeleteConfirmationView(
-                item: item,
-                isDeleting: store.isDeleting,
-                onCancel: { store.pendingDeletionItem = nil },
-                onConfirm: { store.movePendingItemToTrash() }
-            )
+        .sheet(isPresented: deletionPresented) {
+            DeleteConfirmationView(store: store)
+                .interactiveDismissDisabled(store.isMovingToTrash)
         }
+        .sheet(isPresented: $store.showingIssues) {
+            ScanIssuesView(issues: store.report?.issues ?? [])
+        }
+        .onChange(of: store.accessibilityAnnouncement) { _, announcement in
+            if let announcement {
+                AccessibilityAnnouncer.announce(announcement.message)
+            }
+        }
+    }
+
+    private var deletionPresented: Binding<Bool> {
+        Binding(
+            get: { store.deletionFlow != nil },
+            set: { isPresented in
+                if !isPresented {
+                    store.dismissDeletion()
+                }
+            }
+        )
     }
 }
 
@@ -38,7 +55,7 @@ private struct ScanToolbarButton: View {
     @Bindable var store: CleanerStore
 
     private var isDisabled: Bool {
-        !store.isScanning && !store.canScan
+        store.isScanning ? !store.canStopScan : !store.canScan
     }
 
     private var tint: Color {
@@ -77,5 +94,20 @@ private struct ScanToolbarButton: View {
         .disabled(isDisabled)
         .fixedSize()
         .accessibilityLabel(store.isScanning ? "Stop Scan" : "Scan")
+    }
+}
+
+@MainActor
+enum AccessibilityAnnouncer {
+    static func announce(_ message: String) {
+        guard !message.isEmpty else {
+            return
+        }
+
+        NSAccessibility.post(
+            element: NSApp as Any,
+            notification: .announcementRequested,
+            userInfo: [.announcement: message]
+        )
     }
 }

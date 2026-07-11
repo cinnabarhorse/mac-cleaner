@@ -1,3 +1,4 @@
+import MacCleanerFeatures
 import SwiftUI
 
 struct SettingsView: View {
@@ -6,9 +7,9 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("Scan") {
-                Toggle("Hidden Files", isOn: $store.includeHiddenFiles)
-                Toggle("Package Contents", isOn: $store.includePackageContents)
-                Toggle("Symlink Targets", isOn: $store.includeSymlinkTargets)
+                Toggle("Show Hidden Files", isOn: $store.showHiddenFiles)
+                Toggle("Show Package Contents", isOn: $store.showPackageContents)
+                Toggle("Show Symlinks", isOn: $store.showSymbolicLinks)
             }
 
             Section("Results") {
@@ -29,5 +30,6 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .padding()
         .frame(width: 420)
+        .disabled(!store.canEditConfiguration)
     }
 }

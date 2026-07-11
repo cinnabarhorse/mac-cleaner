@@ -13,13 +13,25 @@ let package = Package(
     ],
     targets: [
         .target(name: "MacCleanerCore"),
+        .target(
+            name: "MacCleanerFeatures",
+            dependencies: ["MacCleanerCore"]
+        ),
         .executableTarget(
             name: "MacCleanerApp",
-            dependencies: ["MacCleanerCore"]
+            dependencies: ["MacCleanerCore", "MacCleanerFeatures"]
         ),
         .testTarget(
             name: "MacCleanerCoreTests",
             dependencies: ["MacCleanerCore"]
+        ),
+        .testTarget(
+            name: "MacCleanerFeaturesTests",
+            dependencies: ["MacCleanerFeatures", "MacCleanerCore"]
+        ),
+        .testTarget(
+            name: "MacCleanerPackagedAppE2ETests",
+            dependencies: ["MacCleanerCore", "MacCleanerFeatures"]
         )
     ]
 )

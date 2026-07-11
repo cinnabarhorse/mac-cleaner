@@ -19,24 +19,38 @@ public struct TrashOperationResult: Equatable, Sendable {
 }
 
 public protocol TrashManaging: Sendable {
-    func moveToTrash(_ urls: [URL]) async throws -> TrashOperationResult
+    func moveToTrash(_ request: ValidatedTrashRequest) async throws -> TrashOperationResult
 }
 
-public struct FileManagerTrashService: TrashManaging {
-    public init() {}
+public actor FileManagerTrashService: TrashManaging {
+    private let inspector: DeletionInspector
 
-    public func moveToTrash(_ urls: [URL]) async throws -> TrashOperationResult {
-        try await Task.detached(priority: .userInitiated) {
-            let fileManager = FileManager.default
-            var trashedItems: [TrashedItem] = []
+    public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        inspector = DeletionInspector(homeDirectory: homeDirectory)
+    }
 
-            for url in urls {
-                var resultingURL: NSURL?
-                try fileManager.trashItem(at: url, resultingItemURL: &resultingURL)
-                trashedItems.append(TrashedItem(originalURL: url, trashedURL: resultingURL as URL?))
-            }
+    public func moveToTrash(_ request: ValidatedTrashRequest) async throws -> TrashOperationResult {
+        let current = try inspector.inspect(
+            url: request.summary.url,
+            scanRootPath: request.scanRootPath,
+            configuredRoots: request.configuredRoots,
+            scannedByteSize: request.summary.scannedByteSize,
+            scannedCategory: request.summary.category,
+            minimumRisk: request.summary.risk,
+            scannedRationale: request.summary.classificationRationale
+        )
+        guard current.summary == request.summary else {
+            throw DeletionValidationError.contentsChanged
+        }
+        guard FileSystemSafety.identity(at: request.summary.url) == request.summary.identity else {
+            throw DeletionValidationError.contentsChanged
+        }
 
-            return TrashOperationResult(items: trashedItems)
-        }.value
+        var resultingURL: NSURL?
+        try FileManager.default.trashItem(at: request.summary.url, resultingItemURL: &resultingURL)
+
+        return TrashOperationResult(items: [
+            TrashedItem(originalURL: request.summary.url, trashedURL: resultingURL as URL?)
+        ])
     }
 }

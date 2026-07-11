@@ -62,3 +62,43 @@ public struct ScanReportPersistence: Sendable {
         return decoder
     }
 }
+
+public protocol ScanReportPersisting: Sendable {
+    func load() async throws -> ScanReport?
+    @discardableResult
+    func save(_ report: ScanReport, revision: UInt64) async throws -> Bool
+    @discardableResult
+    func delete(revision: UInt64) async throws -> Bool
+}
+
+public actor SerializedScanReportStore: ScanReportPersisting {
+    public nonisolated let fileURL: URL
+
+    private let persistence: ScanReportPersistence
+    private var latestRevision: UInt64 = 0
+
+    public init(persistence: ScanReportPersistence = .defaultStore()) {
+        self.persistence = persistence
+        fileURL = persistence.fileURL
+    }
+
+    public func load() async throws -> ScanReport? {
+        try persistence.load()
+    }
+
+    @discardableResult
+    public func save(_ report: ScanReport, revision: UInt64) async throws -> Bool {
+        guard revision > latestRevision else { return false }
+        try persistence.save(report)
+        latestRevision = revision
+        return true
+    }
+
+    @discardableResult
+    public func delete(revision: UInt64) async throws -> Bool {
+        guard revision > latestRevision else { return false }
+        try persistence.delete()
+        latestRevision = revision
+        return true
+    }
+}

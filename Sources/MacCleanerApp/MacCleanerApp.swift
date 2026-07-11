@@ -1,4 +1,5 @@
 import MacCleanerCore
+import MacCleanerFeatures
 import SwiftUI
 
 @main
@@ -6,23 +7,25 @@ struct MacCleanerApp: App {
     @State private var store = CleanerStore()
 
     var body: some Scene {
-        WindowGroup {
+        Window("Mac Cleaner", id: "main") {
             ContentView(store: store)
                 .frame(minWidth: 1_050, minHeight: 680)
         }
         .commands {
-            CommandGroup(after: .appInfo) {
+            CommandGroup(replacing: .newItem) {}
+
+            CommandMenu("Cleaner") {
                 Button("Scan") {
                     store.startScan()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
-                .disabled(store.isScanning)
+                .disabled(!store.canScan)
 
                 Button("Stop Scan") {
                     store.stopScan()
                 }
                 .keyboardShortcut(".", modifiers: [.command])
-                .disabled(!store.isScanning)
+                .disabled(!store.canStopScan)
             }
         }
 

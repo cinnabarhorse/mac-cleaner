@@ -1,4 +1,6 @@
+import AppKit
 import MacCleanerCore
+import MacCleanerFeatures
 import SwiftUI
 
 struct SidebarView: View {
@@ -12,15 +14,17 @@ struct SidebarView: View {
                         Label(scope.title, systemImage: scope.systemImage)
                     }
                     .toggleStyle(.checkbox)
+                    .disabled(!store.canEditConfiguration)
                 }
             }
 
             Section("Custom") {
                 Button {
-                    store.addCustomFolder()
+                    store.addCustomFolders(FolderPicker.chooseFolders())
                 } label: {
                     Label("Add Folder", systemImage: "folder.badge.plus")
                 }
+                .disabled(!store.canEditConfiguration)
 
                 ForEach(store.customRoots) { root in
                     CustomRootRow(root: root) {
@@ -28,15 +32,16 @@ struct SidebarView: View {
                     }
                 }
             }
+            .disabled(!store.canEditConfiguration)
 
             Section("Options") {
-                Toggle("Hidden Files", isOn: $store.includeHiddenFiles)
+                Toggle("Show Hidden Files", isOn: $store.showHiddenFiles)
                     .toggleStyle(.checkbox)
 
-                Toggle("Package Contents", isOn: $store.includePackageContents)
+                Toggle("Show Package Contents", isOn: $store.showPackageContents)
                     .toggleStyle(.checkbox)
 
-                Toggle("Symlink Targets", isOn: $store.includeSymlinkTargets)
+                Toggle("Show Symlinks", isOn: $store.showSymbolicLinks)
                     .toggleStyle(.checkbox)
 
                 Picker("Minimum Size", selection: $store.minimumItemSizeBytes) {
@@ -52,6 +57,7 @@ struct SidebarView: View {
                     Text("10,000").tag(10_000)
                 }
             }
+            .disabled(!store.canEditConfiguration)
         }
         .listStyle(.sidebar)
     }
@@ -83,8 +89,23 @@ private struct CustomRootRow: View {
                 Image(systemName: "minus.circle")
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Remove Folder")
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("Remove folder at \(root.url.path)")
+            .accessibilityInputLabels(["Remove folder at \(root.url.path)"])
         }
         .help(root.url.path)
+    }
+}
+
+@MainActor
+private enum FolderPicker {
+    static func chooseFolders() -> [URL] {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Add"
+        return panel.runModal() == .OK ? panel.urls : []
     }
 }
