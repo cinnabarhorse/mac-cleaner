@@ -2,11 +2,35 @@ import Foundation
 
 public typealias ScanProgressHandler = @Sendable (ScanProgress) async -> Void
 
-public actor FileScanner {
+public protocol FileScanning: Sendable {
+    func scan(
+        roots: [ScanRoot],
+        options: ScanOptions,
+        progress: ScanProgressHandler?
+    ) async throws -> ScanReport
+}
+
+public extension FileScanning {
+    func scan(roots: [ScanRoot], options: ScanOptions = ScanOptions()) async throws -> ScanReport {
+        try await scan(roots: roots, options: options, progress: nil)
+    }
+}
+
+public actor FileScanner: FileScanning {
     private let classifier: ItemClassifier
+    private let identityProvider: @Sendable (URL) -> FileIdentity?
 
     public init(classifier: ItemClassifier = ItemClassifier()) {
         self.classifier = classifier
+        identityProvider = FileSystemSafety.identity(at:)
+    }
+
+    init(
+        classifier: ItemClassifier,
+        identityProvider: @escaping @Sendable (URL) -> FileIdentity?
+    ) {
+        self.classifier = classifier
+        self.identityProvider = identityProvider
     }
 
     public func scan(
@@ -15,274 +39,495 @@ public actor FileScanner {
         progress: ScanProgressHandler? = nil
     ) async throws -> ScanReport {
         let startedAt = Date()
+        let scanID = UUID()
         let fileManager = FileManager.default
-        let roots = uniqueExistingRoots(from: rawRoots, fileManager: fileManager)
+        let plan = ScanPlan(roots: rawRoots, identityProvider: identityProvider)
         var issues: [ScanIssue] = []
-        var records: [DiskItem] = []
-        var totalBytes: Int64 = 0
+        var seeds: [String: ItemSeed] = [:]
+        var directoryBytes: [String: Int64] = [:]
+        var directoryFileCounts: [String: Int] = [:]
+        var directoryFolderCounts: [String: Int] = [:]
+        var coverageIssues: [String: Set<String>] = [:]
+        var accountedFileIdentities: Set<FileIdentity> = []
         var scannedItemCount = 0
         var scannedFileCount = 0
         var scannedFolderCount = 0
+        var totalBytes: Int64 = 0
+        var lastSnapshotAt = Date()
 
-        for root in roots {
+        func recordIssue(path rawPath: String, message: String, rootPath: String?) {
+            let path = URL(fileURLWithPath: rawPath).standardizedFileURL.path
+            issues.append(ScanIssue(path: path, message: message))
+            guard let rootPath else { return }
+
+            var current = path
+            while FileSystemSafety.isPath(current, insideOrEqualTo: rootPath) {
+                coverageIssues[current, default: []].insert(path)
+                if current == rootPath { break }
+                let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
+                guard parent != current else { break }
+                current = parent
+            }
+        }
+
+        for rule in plan.rules where rule.identity == nil {
+            recordIssue(path: rule.root.url.path, message: "Path does not exist or cannot be inspected.", rootPath: nil)
+        }
+
+        for planRoot in plan.enumerationRoots {
             try Task.checkCancellation()
 
-            let rootPath = root.url.standardizedFileURL.path
-            guard fileManager.fileExists(atPath: rootPath) else {
-                issues.append(ScanIssue(path: rootPath, message: "Path does not exist."))
-                continue
-            }
-
-            var seeds: [String: ItemSeed] = [:]
-            var directoryBytes: [String: Int64] = [rootPath: 0]
-            var directoryFileCounts: [String: Int] = [rootPath: 0]
-            var directoryFolderCounts: [String: Int] = [rootPath: 0]
+            let rootURL = planRoot.url.standardizedFileURL
+            let rootPath = planRoot.canonicalPath
+            var hiddenByDirectory: [String: Bool] = [:]
+            var packageByDirectory: [String: String] = [:]
 
             await progress?(ScanProgress(
                 currentPath: rootPath,
                 scannedItemCount: scannedItemCount,
                 scannedByteCount: totalBytes,
-                partialReport: records.isEmpty ? nil : makeReport(
-                    roots: roots,
-                    items: records,
+                partialReport: seeds.isEmpty ? nil : makeReport(
+                    plan: plan,
+                    seeds: seeds,
+                    directoryBytes: directoryBytes,
+                    directoryFileCounts: directoryFileCounts,
+                    directoryFolderCounts: directoryFolderCounts,
+                    coverageIssues: coverageIssues,
                     issues: issues,
                     totalBytes: totalBytes,
                     scannedItemCount: scannedItemCount,
                     scannedFileCount: scannedFileCount,
                     scannedFolderCount: scannedFolderCount,
                     startedAt: startedAt,
-                    finishedAt: Date(),
-                    isComplete: false,
-                    options: options
+                    scanID: scanID,
+                    options: options,
+                    isComplete: false
                 )
             ))
 
+            let rootValues: URLResourceValues
             do {
-                let rootValues = try root.url.resourceValues(forKeys: resourceKeys)
-                let rootKind = itemKind(from: rootValues)
-                seeds[rootPath] = ItemSeed(url: root.url, kind: rootKind, values: rootValues, directBytes: 0)
+                rootValues = try rootURL.resourceValues(forKeys: resourceKeys)
             } catch {
-                issues.append(ScanIssue(path: rootPath, message: error.localizedDescription))
+                recordIssue(path: rootPath, message: error.localizedDescription, rootPath: rootPath)
+                continue
             }
 
-            var enumerationOptions: FileManager.DirectoryEnumerationOptions = []
-            if !options.includeHiddenFiles {
-                enumerationOptions.insert(.skipsHiddenFiles)
+            let rootKind = itemKind(from: rootValues)
+            let rootHidden = rootValues.isHidden == true || rootURL.lastPathComponent.hasPrefix(".")
+            hiddenByDirectory[rootPath] = rootHidden
+            directoryBytes[rootPath, default: 0] = 0
+            directoryFileCounts[rootPath, default: 0] = 0
+            directoryFolderCounts[rootPath, default: 0] = 0
+
+            if rootKind == .package {
+                packageByDirectory[rootPath] = rootPath
             }
-            if !options.includePackageContents {
-                enumerationOptions.insert(.skipsPackageDescendants)
+
+            let rootIdentity = identityProvider(rootURL)
+            let rootDirectBytes = allocatedSize(from: rootValues)
+            let rootAccountedBytes: Int64
+            if rootKind == .file || rootKind == .symbolicLink {
+                rootAccountedBytes = if let rootIdentity {
+                    accountedFileIdentities.insert(rootIdentity).inserted ? rootDirectBytes : 0
+                } else {
+                    rootDirectBytes
+                }
+            } else {
+                rootAccountedBytes = 0
+            }
+
+            seeds[rootPath] = ItemSeed(
+                url: rootURL,
+                canonicalPath: rootPath,
+                kind: rootKind,
+                values: rootValues,
+                accountedBytes: rootAccountedBytes,
+                qualifyingBytes: rootDirectBytes,
+                identity: rootIdentity,
+                enumerationRootPath: rootPath,
+                packageRootPath: nil,
+                isHidden: rootHidden
+            )
+
+            if rootKind == .file || rootKind == .symbolicLink {
+                scannedItemCount += 1
+                scannedFileCount += 1
+                totalBytes += rootAccountedBytes
+                continue
             }
 
             guard let enumerator = fileManager.enumerator(
-                at: root.url,
+                at: rootURL,
                 includingPropertiesForKeys: Array(resourceKeys),
-                options: enumerationOptions,
+                options: [],
                 errorHandler: { url, error in
-                    issues.append(ScanIssue(path: url.path, message: error.localizedDescription))
+                    recordIssue(path: url.path, message: error.localizedDescription, rootPath: rootPath)
                     return true
                 }
             ) else {
-                issues.append(ScanIssue(path: rootPath, message: "Unable to enumerate path."))
+                recordIssue(path: rootPath, message: "Unable to enumerate path.", rootPath: rootPath)
                 continue
             }
 
             while let url = enumerator.nextObject() as? URL {
                 try Task.checkCancellation()
+                let standardizedURL = url.standardizedFileURL
+                let path = standardizedURL.path
+                let parentPath = standardizedURL.deletingLastPathComponent().standardizedFileURL.path
 
-                let path = url.standardizedFileURL.path
                 do {
-                    let values = try url.resourceValues(forKeys: resourceKeys)
+                    let values = try standardizedURL.resourceValues(forKeys: resourceKeys)
                     let kind = itemKind(from: values)
+                    let identity = identityProvider(standardizedURL)
+                    let canonicalPath = FileSystemSafety.canonicalPath(for: standardizedURL)
 
-                    if kind == .symbolicLink && !options.includeSymlinkTargets {
+                    if kind != .symbolicLink && !FileSystemSafety.isPath(canonicalPath, insideOrEqualTo: rootPath) {
+                        recordIssue(path: path, message: "The path resolves outside its scan root.", rootPath: rootPath)
+                        if kind == .folder || kind == .package { enumerator.skipDescendants() }
                         continue
                     }
 
-                    if values.isHidden == true && !options.includeHiddenFiles {
-                        continue
+                    let crossesMountBoundary = identity.map {
+                        $0.deviceID != planRoot.identity.deviceID
+                    } ?? false
+                    if crossesMountBoundary {
+                        recordIssue(path: path, message: "Mounted volume boundary was not traversed.", rootPath: rootPath)
+                        if kind == .folder || kind == .package { enumerator.skipDescendants() }
                     }
 
                     scannedItemCount += 1
                     let directBytes = allocatedSize(from: values)
-                    seeds[path] = ItemSeed(url: url, kind: kind, values: values, directBytes: directBytes)
+                    let parentIsHidden = hiddenByDirectory[parentPath] ?? false
+                    let isHidden = parentIsHidden || values.isHidden == true || standardizedURL.lastPathComponent.hasPrefix(".")
+                    let inheritedPackage = packageByDirectory[parentPath]
 
                     switch kind {
                     case .file, .symbolicLink:
                         scannedFileCount += 1
-                        for ancestor in ancestorDirectoryPaths(for: url, rootPath: rootPath) {
-                            directoryBytes[ancestor, default: 0] += directBytes
-                            directoryFileCounts[ancestor, default: 0] += 1
+                        let shouldAccount: Bool
+                        if crossesMountBoundary {
+                            shouldAccount = false
+                        } else if let identity {
+                            shouldAccount = accountedFileIdentities.insert(identity).inserted
+                        } else {
+                            shouldAccount = true
                         }
+                        let accountedBytes = shouldAccount ? directBytes : 0
+                        totalBytes += accountedBytes
+                        addFile(
+                            at: standardizedURL,
+                            accountedBytes: accountedBytes,
+                            rootPath: rootPath,
+                            directoryBytes: &directoryBytes,
+                            directoryFileCounts: &directoryFileCounts
+                        )
+
+                        if directBytes >= options.minimumItemSizeBytes || kind == .symbolicLink {
+                            seeds[path] = ItemSeed(
+                                url: standardizedURL,
+                                canonicalPath: canonicalPath,
+                                kind: kind,
+                                values: values,
+                                accountedBytes: accountedBytes,
+                                qualifyingBytes: directBytes,
+                                identity: identity,
+                                enumerationRootPath: rootPath,
+                                packageRootPath: inheritedPackage,
+                                isHidden: isHidden
+                            )
+                        }
+
                     case .folder, .package:
                         scannedFolderCount += 1
-                        directoryBytes[path, default: 0] += 0
-                        directoryFileCounts[path, default: 0] += 0
-                        directoryFolderCounts[path, default: 0] += 0
-                        for ancestor in ancestorDirectoryPaths(for: url, rootPath: rootPath) {
-                            directoryFolderCounts[ancestor, default: 0] += 1
-                        }
+                        directoryBytes[path, default: 0] = 0
+                        directoryFileCounts[path, default: 0] = 0
+                        directoryFolderCounts[path, default: 0] = 0
+                        addFolder(
+                            at: standardizedURL,
+                            rootPath: rootPath,
+                            directoryFolderCounts: &directoryFolderCounts
+                        )
+                        hiddenByDirectory[path] = isHidden
+                        packageByDirectory[path] = inheritedPackage ?? (kind == .package ? path : nil)
+                        seeds[path] = ItemSeed(
+                            url: standardizedURL,
+                            canonicalPath: canonicalPath,
+                            kind: kind,
+                            values: values,
+                            accountedBytes: 0,
+                            qualifyingBytes: 0,
+                            identity: identity,
+                            enumerationRootPath: rootPath,
+                            packageRootPath: inheritedPackage,
+                            isHidden: isHidden
+                        )
+
                     case .inaccessible:
-                        break
+                        recordIssue(path: path, message: "Unsupported or inaccessible file type.", rootPath: rootPath)
                     }
 
-                    if scannedItemCount.isMultiple(of: 100) {
-                        let scannedBytes = totalBytes + (directoryBytes[rootPath] ?? 0)
-                        let partialReport: ScanReport? = if scannedItemCount.isMultiple(of: options.snapshotItemInterval) {
-                            snapshotReport(
-                                roots: roots,
-                                completedItems: records,
-                                seeds: seeds,
-                                directoryBytes: directoryBytes,
-                                directoryFileCounts: directoryFileCounts,
-                                directoryFolderCounts: directoryFolderCounts,
-                                root: root,
-                                rootPath: rootPath,
-                                issues: issues,
-                                totalBytes: scannedBytes,
-                                scannedItemCount: scannedItemCount,
-                                scannedFileCount: scannedFileCount,
-                                scannedFolderCount: scannedFolderCount,
-                                startedAt: startedAt,
-                                options: options
-                            )
-                        } else {
-                            nil
-                        }
+                    let now = Date()
+                    let shouldSnapshot = now.timeIntervalSince(lastSnapshotAt) >= options.snapshotInterval
+                    if shouldSnapshot || scannedItemCount.isMultiple(of: 100) {
+                        let partialReport = shouldSnapshot ? makeReport(
+                            plan: plan,
+                            seeds: seeds,
+                            directoryBytes: directoryBytes,
+                            directoryFileCounts: directoryFileCounts,
+                            directoryFolderCounts: directoryFolderCounts,
+                            coverageIssues: coverageIssues,
+                            issues: issues,
+                            totalBytes: totalBytes,
+                            scannedItemCount: scannedItemCount,
+                            scannedFileCount: scannedFileCount,
+                            scannedFolderCount: scannedFolderCount,
+                            startedAt: startedAt,
+                            scanID: scanID,
+                            options: options,
+                            isComplete: false
+                        ) : nil
+                        if shouldSnapshot { lastSnapshotAt = now }
 
                         await progress?(ScanProgress(
                             currentPath: path,
                             scannedItemCount: scannedItemCount,
-                            scannedByteCount: scannedBytes,
+                            scannedByteCount: totalBytes,
                             partialReport: partialReport
                         ))
                     }
                 } catch {
-                    issues.append(ScanIssue(path: path, message: error.localizedDescription))
+                    recordIssue(path: path, message: error.localizedDescription, rootPath: rootPath)
                 }
             }
-
-            let rootBytes = directoryBytes[rootPath] ?? 0
-            totalBytes += rootBytes
-            records.append(contentsOf: items(
-                from: seeds,
-                directoryBytes: directoryBytes,
-                directoryFileCounts: directoryFileCounts,
-                directoryFolderCounts: directoryFolderCounts,
-                root: root,
-                rootPath: rootPath,
-                options: options
-            ))
 
             await progress?(ScanProgress(
                 currentPath: rootPath,
                 scannedItemCount: scannedItemCount,
                 scannedByteCount: totalBytes,
                 partialReport: makeReport(
-                    roots: roots,
-                    items: records,
+                    plan: plan,
+                    seeds: seeds,
+                    directoryBytes: directoryBytes,
+                    directoryFileCounts: directoryFileCounts,
+                    directoryFolderCounts: directoryFolderCounts,
+                    coverageIssues: coverageIssues,
                     issues: issues,
                     totalBytes: totalBytes,
                     scannedItemCount: scannedItemCount,
                     scannedFileCount: scannedFileCount,
                     scannedFolderCount: scannedFolderCount,
                     startedAt: startedAt,
-                    finishedAt: Date(),
-                    isComplete: false,
-                    options: options
+                    scanID: scanID,
+                    options: options,
+                    isComplete: false
                 )
             ))
+            lastSnapshotAt = Date()
         }
 
         return makeReport(
-            roots: roots,
-            items: records,
+            plan: plan,
+            seeds: seeds,
+            directoryBytes: directoryBytes,
+            directoryFileCounts: directoryFileCounts,
+            directoryFolderCounts: directoryFolderCounts,
+            coverageIssues: coverageIssues,
             issues: issues,
             totalBytes: totalBytes,
             scannedItemCount: scannedItemCount,
             scannedFileCount: scannedFileCount,
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
-            finishedAt: Date(),
-            options: options
+            scanID: scanID,
+            options: options,
+            isComplete: true
         )
     }
 
     private func makeReport(
-        roots: [ScanRoot],
-        items rawItems: [DiskItem],
-        issues: [ScanIssue],
-        totalBytes: Int64,
-        scannedItemCount: Int,
-        scannedFileCount: Int,
-        scannedFolderCount: Int,
-        startedAt: Date,
-        finishedAt: Date,
-        isComplete: Bool = true,
-        options: ScanOptions
-    ) -> ScanReport {
-        let items = deduplicated(rawItems)
-            .sorted { lhs, rhs in
-                if lhs.byteSize == rhs.byteSize {
-                    return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
-                }
-                return lhs.byteSize > rhs.byteSize
-            }
-            .prefix(options.maxReturnedItems)
-
-        return ScanReport(
-            roots: roots,
-            items: Array(items),
-            issues: issues,
-            totalBytes: totalBytes,
-            scannedItemCount: scannedItemCount,
-            scannedFileCount: scannedFileCount,
-            scannedFolderCount: scannedFolderCount,
-            startedAt: startedAt,
-            finishedAt: finishedAt,
-            isComplete: isComplete
-        )
-    }
-
-    private func snapshotReport(
-        roots: [ScanRoot],
-        completedItems: [DiskItem],
+        plan: ScanPlan,
         seeds: [String: ItemSeed],
         directoryBytes: [String: Int64],
         directoryFileCounts: [String: Int],
         directoryFolderCounts: [String: Int],
-        root: ScanRoot,
-        rootPath: String,
+        coverageIssues: [String: Set<String>],
         issues: [ScanIssue],
         totalBytes: Int64,
         scannedItemCount: Int,
         scannedFileCount: Int,
         scannedFolderCount: Int,
         startedAt: Date,
-        options: ScanOptions
+        scanID: UUID,
+        options: ScanOptions,
+        isComplete: Bool
     ) -> ScanReport {
-        let currentItems = items(
-            from: seeds,
-            directoryBytes: directoryBytes,
-            directoryFileCounts: directoryFileCounts,
-            directoryFolderCounts: directoryFolderCounts,
-            root: root,
-            rootPath: rootPath,
-            options: options
-        )
+        let observations = seeds.values.compactMap { seed -> DiskItem? in
+            let byteSize: Int64
+            let fileCount: Int
+            let folderCount: Int
 
-        return makeReport(
-            roots: roots,
-            items: completedItems + currentItems,
-            issues: issues,
+            switch seed.kind {
+            case .file, .symbolicLink:
+                byteSize = seed.accountedBytes
+                fileCount = 1
+                folderCount = 0
+            case .folder, .package:
+                byteSize = directoryBytes[seed.url.path] ?? 0
+                fileCount = directoryFileCounts[seed.url.path] ?? 0
+                folderCount = directoryFolderCounts[seed.url.path] ?? 0
+            case .inaccessible:
+                byteSize = 0
+                fileCount = 0
+                folderCount = 0
+            }
+
+            guard seed.kind == .symbolicLink
+                || max(byteSize, seed.qualifyingBytes) >= options.minimumItemSizeBytes else { return nil }
+            let issuePaths = Array(coverageIssues[seed.url.path] ?? []).sorted()
+            let coverage = issuePaths.isEmpty ? ScanCoverage.complete : .incomplete(issuePaths)
+            let matchingRoots = plan.rules
+                .filter { FileSystemSafety.isPath(seed.canonicalPath, insideOrEqualTo: $0.canonicalPath) }
+                .map(\.root)
+            let isConfiguredRoot = plan.rules.contains {
+                seed.url.path == $0.root.url.standardizedFileURL.path || seed.canonicalPath == $0.canonicalPath
+            }
+            let containsConfiguredRoot = seed.kind == .folder || seed.kind == .package
+                ? plan.rules.contains {
+                    FileSystemSafety.isPath($0.root.url.standardizedFileURL.path, insideOrEqualTo: seed.url.path)
+                        || FileSystemSafety.isPath($0.canonicalPath, insideOrEqualTo: seed.canonicalPath)
+                }
+                : false
+            let classification = classifier.classify(
+                url: seed.url,
+                kind: seed.kind,
+                matchingRoots: matchingRoots,
+                isConfiguredRoot: isConfiguredRoot,
+                coverage: coverage,
+                packageRootPath: seed.packageRootPath
+            )
+            let eligibility: DeletionEligibility
+            if seed.identity == nil {
+                eligibility = .blocked("The file identity could not be verified.")
+            } else if containsConfiguredRoot && !isConfiguredRoot {
+                eligibility = .blocked("This folder contains a configured scan root.")
+            } else {
+                eligibility = classification.deletionEligibility
+            }
+            let rationale = containsConfiguredRoot && !isConfiguredRoot
+                ? classification.rationale + " Deleting it would also remove a configured scan root."
+                : classification.rationale
+
+            return DiskItem(
+                url: seed.url,
+                kind: seed.kind,
+                category: classification.category,
+                risk: classification.risk,
+                byteSize: byteSize,
+                fileCount: fileCount,
+                childFolderCount: folderCount,
+                modifiedAt: seed.values.contentModificationDate,
+                lastAccessedAt: seed.values.contentAccessDate,
+                rootPath: seed.enumerationRootPath,
+                fileIdentity: seed.identity,
+                canonicalPath: seed.canonicalPath,
+                coverage: coverage,
+                deletionEligibility: eligibility,
+                classificationRationale: rationale,
+                applicationProfile: classification.applicationProfile,
+                packageRootPath: seed.packageRootPath,
+                isHidden: seed.isHidden
+            )
+        }
+
+        let items = mergeDuplicateObservations(observations)
+        .sorted { lhs, rhs in
+            if lhs.byteSize == rhs.byteSize {
+                return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
+            }
+            return lhs.byteSize > rhs.byteSize
+        }
+        .prefix(options.maxReturnedItems)
+
+        var seenIssues: Set<String> = []
+        let uniqueIssues = issues.filter { seenIssues.insert($0.id).inserted }
+        return ScanReport(
+            roots: plan.configuredRoots,
+            items: Array(items),
+            issues: uniqueIssues,
             totalBytes: totalBytes,
             scannedItemCount: scannedItemCount,
             scannedFileCount: scannedFileCount,
             scannedFolderCount: scannedFolderCount,
             startedAt: startedAt,
             finishedAt: Date(),
-            isComplete: false,
-            options: options
+            isComplete: isComplete,
+            scanID: scanID,
+            freshness: .current
         )
+    }
+
+    private func mergeDuplicateObservations(_ observations: [DiskItem]) -> [DiskItem] {
+        var observationsByIdentity: [FileIdentity: [DiskItem]] = [:]
+        for item in observations {
+            guard let identity = item.fileIdentity else { continue }
+            observationsByIdentity[identity, default: []].append(item)
+        }
+
+        return observations.map { item in
+            guard let identity = item.fileIdentity,
+                  let duplicates = observationsByIdentity[identity],
+                  duplicates.count > 1 else {
+                return item
+            }
+
+            let highestRisk = duplicates.map(\.risk).max() ?? item.risk
+            let blockingObservation = duplicates
+                .filter { !$0.deletionEligibility.isEligible || $0.risk == .protected }
+                .sorted {
+                    if $0.risk != $1.risk { return $0.risk > $1.risk }
+                    return $0.path.localizedStandardCompare($1.path) == .orderedAscending
+                }
+                .first
+            let mergedEligibility = blockingObservation.map { blockedItem in
+                DeletionEligibility.blocked(
+                    "A duplicate physical observation is read-only: \(blockedItem.deletionEligibility.reason ?? "the matching location is protected")."
+                )
+            } ?? item.deletionEligibility
+
+            guard highestRisk != item.risk || mergedEligibility != item.deletionEligibility else {
+                return item
+            }
+
+            var rationale = item.classificationRationale
+            if highestRisk > item.risk {
+                rationale += " A hard-linked observation raises the risk to \(highestRisk.displayName.lowercased())."
+            }
+            if blockingObservation != nil {
+                rationale += " A protected or read-only observation of the same physical item blocks deletion."
+            }
+
+            return DiskItem(
+                url: item.url,
+                kind: item.kind,
+                category: item.category,
+                risk: highestRisk,
+                byteSize: item.byteSize,
+                fileCount: item.fileCount,
+                childFolderCount: item.childFolderCount,
+                modifiedAt: item.modifiedAt,
+                lastAccessedAt: item.lastAccessedAt,
+                rootPath: item.rootPath,
+                fileIdentity: item.fileIdentity,
+                canonicalPath: item.canonicalPath,
+                coverage: item.coverage,
+                deletionEligibility: mergedEligibility,
+                classificationRationale: rationale,
+                applicationProfile: item.applicationProfile,
+                packageRootPath: item.packageRootPath,
+                isHidden: item.isHidden
+            )
+        }
     }
 
     private var resourceKeys: Set<URLResourceKey> {
@@ -300,159 +545,63 @@ public actor FileScanner {
         ]
     }
 
-    private func uniqueExistingRoots(from roots: [ScanRoot], fileManager: FileManager) -> [ScanRoot] {
-        var seen: Set<String> = []
-        var uniqueRoots: [ScanRoot] = []
-
-        for root in roots {
-            let path = root.url.standardizedFileURL.path
-            guard seen.insert(path).inserted else {
-                continue
-            }
-
-            uniqueRoots.append(root)
-        }
-
-        return uniqueRoots
-    }
-
-    private func items(
-        from seeds: [String: ItemSeed],
-        directoryBytes: [String: Int64],
-        directoryFileCounts: [String: Int],
-        directoryFolderCounts: [String: Int],
-        root: ScanRoot,
-        rootPath: String,
-        options: ScanOptions
-    ) -> [DiskItem] {
-        seeds.compactMap { path, seed in
-            let bytes: Int64
-            let fileCount: Int
-            let folderCount: Int
-
-            switch seed.kind {
-            case .file, .symbolicLink:
-                bytes = seed.directBytes
-                fileCount = 1
-                folderCount = 0
-            case .folder, .package:
-                bytes = directoryBytes[path] ?? 0
-                fileCount = directoryFileCounts[path] ?? 0
-                folderCount = directoryFolderCounts[path] ?? 0
-            case .inaccessible:
-                bytes = 0
-                fileCount = 0
-                folderCount = 0
-            }
-
-            guard bytes >= options.minimumItemSizeBytes else {
-                return nil
-            }
-
-            let classification = classifier.classify(url: seed.url, kind: seed.kind, root: root)
-            let isRoot = path == rootPath
-
-            return DiskItem(
-                url: seed.url,
-                kind: seed.kind,
-                category: classification.category,
-                risk: classification.risk,
-                byteSize: bytes,
-                fileCount: fileCount,
-                childFolderCount: folderCount,
-                modifiedAt: seed.values.contentModificationDate,
-                lastAccessedAt: seed.values.contentAccessDate,
-                rootPath: rootPath,
-                isDeletableCandidate: classification.isDeletableCandidate && !isRoot
-            )
-        }
-    }
-
-    private func deduplicated(_ items: [DiskItem]) -> [DiskItem] {
-        var byID: [DiskItem.ID: DiskItem] = [:]
-
-        for item in items {
-            guard let existing = byID[item.id] else {
-                byID[item.id] = item
-                continue
-            }
-
-            if shouldReplace(existing: existing, candidate: item) {
-                byID[item.id] = item
-            }
-        }
-
-        return Array(byID.values)
-    }
-
-    private func shouldReplace(existing: DiskItem, candidate: DiskItem) -> Bool {
-        if existing.category == .other && candidate.category != .other {
-            return true
-        }
-
-        if existing.risk == .protected && candidate.risk != .protected {
-            return true
-        }
-
-        return candidate.byteSize > existing.byteSize
-    }
-
     private func itemKind(from values: URLResourceValues) -> DiskItemKind {
-        if values.isSymbolicLink == true {
-            return .symbolicLink
-        }
-
-        if values.isDirectory == true {
-            return values.isPackage == true ? .package : .folder
-        }
-
-        if values.isRegularFile == true {
-            return .file
-        }
-
+        if values.isSymbolicLink == true { return .symbolicLink }
+        if values.isDirectory == true { return values.isPackage == true ? .package : .folder }
+        if values.isRegularFile == true { return .file }
         return .inaccessible
     }
 
     private func allocatedSize(from values: URLResourceValues) -> Int64 {
-        let size = values.totalFileAllocatedSize
-            ?? values.fileAllocatedSize
-            ?? values.fileSize
-            ?? 0
-
-        return Int64(size)
+        Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
     }
 
-    private func ancestorDirectoryPaths(for url: URL, rootPath: String) -> [String] {
-        let normalizedRoot = URL(fileURLWithPath: rootPath).standardizedFileURL.path
-        var current = url.deletingLastPathComponent().standardizedFileURL.path
-        var ancestors: [String] = []
-
-        while isPath(current, insideOrEqualTo: normalizedRoot) {
-            ancestors.append(current)
-
-            if current == normalizedRoot {
-                break
-            }
-
-            let next = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
-            guard next != current else {
-                break
-            }
-
-            current = next
+    private func addFile(
+        at url: URL,
+        accountedBytes: Int64,
+        rootPath: String,
+        directoryBytes: inout [String: Int64],
+        directoryFileCounts: inout [String: Int]
+    ) {
+        for ancestor in ancestorPaths(for: url.deletingLastPathComponent().path, rootPath: rootPath) {
+            directoryBytes[ancestor, default: 0] += accountedBytes
+            directoryFileCounts[ancestor, default: 0] += 1
         }
-
-        return ancestors
     }
 
-    private func isPath(_ path: String, insideOrEqualTo rootPath: String) -> Bool {
-        path == rootPath || path.hasPrefix(rootPath + "/")
+    private func addFolder(
+        at url: URL,
+        rootPath: String,
+        directoryFolderCounts: inout [String: Int]
+    ) {
+        for ancestor in ancestorPaths(for: url.deletingLastPathComponent().path, rootPath: rootPath) {
+            directoryFolderCounts[ancestor, default: 0] += 1
+        }
+    }
+
+    private func ancestorPaths(for initialPath: String, rootPath: String) -> [String] {
+        var current = URL(fileURLWithPath: initialPath).standardizedFileURL.path
+        var result: [String] = []
+        while FileSystemSafety.isPath(current, insideOrEqualTo: rootPath) {
+            result.append(current)
+            if current == rootPath { break }
+            let parent = URL(fileURLWithPath: current).deletingLastPathComponent().standardizedFileURL.path
+            guard parent != current else { break }
+            current = parent
+        }
+        return result
     }
 }
 
 private struct ItemSeed {
     let url: URL
+    let canonicalPath: String
     let kind: DiskItemKind
     let values: URLResourceValues
-    let directBytes: Int64
+    let accountedBytes: Int64
+    let qualifyingBytes: Int64
+    let identity: FileIdentity?
+    let enumerationRootPath: String
+    let packageRootPath: String?
+    let isHidden: Bool
 }

@@ -28,9 +28,7 @@ public struct KnownAppProfile: Identifiable, Hashable, Sendable {
         let relativeRoots = relativePaths.map { relativePath in
             ScanRoot(
                 title: name,
-                url: homeDirectory.appendingPathComponent(relativePath, isDirectory: true),
-                categoryHint: category,
-                riskHint: risk
+                url: homeDirectory.appendingPathComponent(relativePath, isDirectory: true)
             )
         }
 
@@ -38,8 +36,6 @@ public struct KnownAppProfile: Identifiable, Hashable, Sendable {
             ScanRoot(
                 title: name,
                 url: URL(fileURLWithPath: absolutePath, isDirectory: true),
-                categoryHint: category,
-                riskHint: risk,
                 isSystemScope: !absolutePath.hasPrefix(homeDirectory.path)
             )
         }

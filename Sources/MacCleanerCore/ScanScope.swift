@@ -129,7 +129,7 @@ public enum ScanScope: String, CaseIterable, Identifiable, Sendable {
         case .finalCut:
             KnownAppProfile.finalCut.roots(homeDirectory: homeDirectory)
         case .home:
-            [ScanRoot(title: title, url: homeDirectory, categoryHint: nil, riskHint: .high)]
+            [ScanRoot(title: title, url: homeDirectory)]
         case .systemCaches:
             [ScanRoot(title: title, url: URL(fileURLWithPath: "/Library/Caches"), categoryHint: .cache, riskHint: .protected, isSystemScope: true)]
         case .systemApplicationSupport:

@@ -1,4 +1,6 @@
+import AppKit
 import MacCleanerCore
+import MacCleanerFeatures
 import SwiftUI
 
 struct DetailPane: View {
@@ -18,6 +20,7 @@ struct DetailPane: View {
 private struct ItemDetailView: View {
     @Bindable var store: CleanerStore
     let item: DiskItem
+    @AccessibilityFocusState private var trashButtonFocused: Bool
 
     var body: some View {
         ScrollView {
@@ -32,6 +35,15 @@ private struct ItemDetailView: View {
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onChange(of: store.isDeletionPresented) { wasPresented, isPresented in
+            guard wasPresented, !isPresented else {
+                return
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(100))
+                trashButtonFocused = true
+            }
         }
     }
 
@@ -60,13 +72,13 @@ private struct ItemDetailView: View {
     private var actions: some View {
         HStack {
             Button {
-                store.revealInFinder(item)
+                DetailActions.revealInFinder(item)
             } label: {
                 Label("Reveal", systemImage: "finder")
             }
 
             Button {
-                store.copyPath(item)
+                DetailActions.copyPath(item)
             } label: {
                 Label("Copy Path", systemImage: "doc.on.doc")
             }
@@ -78,21 +90,15 @@ private struct ItemDetailView: View {
             } label: {
                 Label("Move to Trash", systemImage: "trash")
             }
-            .disabled(!item.isDeletableCandidate || store.isDeleting)
+            .disabled(store.deletionBlockReason(for: item) != nil)
             .help(trashHelpText)
+            .accessibilityFocused($trashButtonFocused)
+            .accessibilityHint(trashHelpText)
         }
     }
 
     private var trashHelpText: String {
-        if item.isDeletableCandidate {
-            return "Move to Trash"
-        }
-
-        if item.risk == .protected {
-            return "Protected"
-        }
-
-        return "Scan root"
+        store.deletionBlockReason(for: item) ?? "Runs a fresh safety check before confirmation."
     }
 
     private var metadata: some View {
@@ -106,6 +112,18 @@ private struct ItemDetailView: View {
             MetadataTextRow(label: "Files", value: item.fileCount.formatted())
             MetadataTextRow(label: "Folders", value: item.childFolderCount.formatted())
             MetadataTextRow(label: "Root", value: item.rootPath)
+            MetadataTextRow(label: "Why", value: item.classificationRationale)
+
+            if let applicationProfile = item.applicationProfile {
+                MetadataTextRow(label: "Profile", value: applicationProfile)
+            }
+
+            if !item.coverage.isComplete {
+                MetadataTextRow(
+                    label: "Coverage",
+                    value: "Incomplete (\(item.coverage.issuePaths.count.formatted()) issue\(item.coverage.issuePaths.count == 1 ? "" : "s"))"
+                )
+            }
 
             if let modifiedAt = item.modifiedAt {
                 MetadataTextRow(label: "Modified", value: modifiedAt.formatted(date: .abbreviated, time: .shortened))
@@ -132,7 +150,26 @@ private struct ItemDetailView: View {
                 }
                 .font(.caption)
             }
+
+            if issues.count > 8 {
+                Button("Show All \(issues.count.formatted()) Issues") {
+                    store.showingIssues = true
+                }
+            }
         }
+    }
+}
+
+@MainActor
+private enum DetailActions {
+    static func revealInFinder(_ item: DiskItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.url])
+    }
+
+    static func copyPath(_ item: DiskItem) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(item.path, forType: .string)
+        AccessibilityAnnouncer.announce("Copied path.")
     }
 }
 
